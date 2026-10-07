@@ -1,5 +1,5 @@
 {
-  "name": "Bluetooth Audio Bridge Repository",
-  "url": "https://github.com/dcybeldesign/ha-mpd-bluetooth-bridge",
-  "maintainer": "dcybeldesign"
+  "name": "Bluetooth Audio Bridge Battery TEST",
+  "url": "https://github.com/sedarts/ha-bluetooth-battery-test",
+  "maintainer": "sedarts"
 }

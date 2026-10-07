@@ -5,7 +5,7 @@
 # que le Supervisor HAOS lit pour savoir comment construire et lancer
 # le conteneur, et quelles permissions système lui accorder.
 
-name: "Bluetooth Audio Bridge"
+name: "Bluetooth Audio Bridge Battery TEST"
 # Nom affiché dans l'interface Home Assistant (Paramètres > Applications).
 # Renommé le 2026-08-20 (choix validé avec l'utilisateur) : l'add-on
 # n'est plus seulement un pont MPD, il expose aussi un media_player natif
@@ -66,7 +66,7 @@ version: "2.6.0"
 # comme enceinte supplémentaire au lieu de la supprimer (voir CHANGELOG,
 # GitHub issue #8). Branche `fix/set-primary-keeps-previous`.
 
-slug: "bluetooth_audio_bridge"
+slug: "bluetooth_audio_bridge_battery_test"
 # Identifiant technique unique de l'add-on (utilisé dans les URLs internes,
 # les noms de conteneur Docker, etc.). Pas d'espace, pas d'accent.
 # Changé le 2026-08-20 depuis "mpd_bluetooth_bridge" en même temps que le

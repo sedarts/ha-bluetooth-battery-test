@@ -5,7 +5,7 @@
 # que le Supervisor HAOS lit pour savoir comment construire et lancer
 # le conteneur, et quelles permissions système lui accorder.
 
-name: "Bluetooth Audio Bridge Battery TEST"
+name: "Bluetooth Audio Bridge 2.6.2 Test"
 # Nom affiché dans l'interface Home Assistant (Paramètres > Applications).
 # Renommé le 2026-08-20 (choix validé avec l'utilisateur) : l'add-on
 # n'est plus seulement un pont MPD, il expose aussi un media_player natif
@@ -14,7 +14,7 @@ name: "Bluetooth Audio Bridge Battery TEST"
 # Ancien nom : "Bluetooth Speaker MPD Bridge" (ancien nom encore avant :
 # "MPD JBL Bridge").
 
-version: "2.6.0"
+version: "2.6.2-test.1"
 # Version de l'add-on. À incrémenter à chaque modification si on veut
 # que le Supervisor propose une "mise à jour" plus tard.
 # Bump en 2.0.0 : changement de nom/slug (rupture de compatibilité pour
@@ -75,11 +75,11 @@ slug: "bluetooth_audio_bridge_battery_test"
 # bloquait "mpd_bluetooth_bridge" sur un très vieux build (voir le journal
 # du projet dans le vault pour le détail).
 
-description: "Connect any Bluetooth speaker to Home Assistant as a native media_player, with optional MPD/Music Assistant support."
+description: "Isolated test build of Bluetooth Audio Bridge 2.6.2. Do not run alongside the production bridge."
 # En anglais : c'est ce texte qui s'affiche dans le magasin d'add-ons HA,
 # dont l'audience est la communauté internationale, pas seulement toi.
 
-url: "https://github.com/dcybeldesign/ha-mpd-bluetooth-bridge"
+url: "https://github.com/sedarts/ha-bluetooth-battery-test"
 # À adapter si le dépôt communautaire est finalement créé sous un autre
 # nom/compte — voir le dépôt réel une fois poussé.
 
@@ -188,6 +188,10 @@ options:
   battery_mqtt_port: 1883
   battery_mqtt_username: ""
   battery_mqtt_password: ""
+  power_management_enabled: false
+  idle_timeout: 300
+  ble_wake_enabled: false
+  ble_adapter_mac: ""
   # bluetooth_mac vide par défaut : depuis 2.4.0, c'est le point de départ
   # normal d'une première installation (mode configuration, voir schema
   # ci-dessous). L'enceinte est ensuite choisie depuis la page
@@ -209,6 +213,10 @@ schema:
   battery_mqtt_port: "port?"
   battery_mqtt_username: "str?"
   battery_mqtt_password: "password?"
+  power_management_enabled: "bool?"
+  idle_timeout: "int(60,3600)?"
+  ble_wake_enabled: "bool?"
+  ble_adapter_mac: "match(^$|^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$)?"
   bluetooth_mac: "match(^(([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})?$)?"
   # Valide le format d'une adresse MAC Bluetooth (ex: AA:BB:CC:DD:EE:FF) et
   # affiche une erreur claire dans l'UI si l'utilisateur se trompe de format,

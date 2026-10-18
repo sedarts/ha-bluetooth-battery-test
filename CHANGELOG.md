@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.6.2
+- Added an opt-in MQTT power-management controller for the primary speaker.
+  It discovers a Home Assistant switch, wake button, disconnect button and
+  connection-state sensor. Existing installs keep the former behavior until
+  `power_management_enabled` is enabled.
+- Added configurable `idle_timeout` (60–3600 seconds). An explicit `idle`
+  command waits for the timeout, disconnects Bluetooth audio and suppresses
+  no BLE power-off command; the speaker's own standby behaviour is retained.
+- Added an opt-in UE BOOM 2 BLE wake path. It uses the verified forward-order
+  adapter-MAC payload plus `01`; a successful wake can disconnect BLE before
+  Classic audio reconnects, which is handled as expected behaviour.
+
 ## 2.5.1
 - **Set as primary** no longer drops the previous primary speaker. It stays
   configured as an extra speaker, so changing the primary speaker in the

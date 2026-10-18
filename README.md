@@ -243,6 +243,33 @@ with this repository's URL pre-filled, just confirm to add it.
 | `enable_mpd` | Whether to start the MPD server. The Bluetooth connection and the native `media_player` are unaffected either way; turn this off if you only want the native `media_player` output and don't use Music Assistant. | `true` |
 | `default_volume` | Volume (%) automatically restored if the speaker's PulseAudio sink is ever found muted or at 0% (otherwise stays silent indefinitely, even across reboots). Never overrides a volume you've deliberately set as long as it isn't 0%. | `70` |
 | `renderer_volume` | Volume level (as shown by the volume slider of the `media_player` in Home Assistant) each speaker's `media_player` starts at, every time the add-on starts or the speaker reconnects. `100` keeps the previous behavior (it used to start at 100 every time). Not the same as `default_volume`, which only concerns the speaker's PulseAudio sink. | `100` |
+| `power_management_enabled` | Enables the opt-in primary-speaker power controller and its MQTT Discovery entities. Existing reconnect behaviour is unchanged while disabled. | `false` |
+| `idle_timeout` | Delay in seconds after the explicit `idle` command before Bluetooth audio is disconnected. | `300` |
+| `ble_wake_enabled` | Allows the verified UE BOOM 2 BLE wake write when a `wake` command is received. Keep off until validated on this installation. | `false` |
+| `ble_adapter_mac` | Bluetooth adapter MAC used to construct the UE BOOM 2 wake payload. Required when BLE wake is enabled. | *(empty)* |
+
+## Opt-in power management (2.6.2)
+
+When MQTT battery monitoring is configured, the bridge publishes Home Assistant MQTT
+Discovery entities for the primary speaker: a power-management switch, **Wake** and
+**Disconnect audio** buttons, and a connection-state sensor. Their shared command topic
+is `bluetooth_audio_bridge/<speaker-mac-without-colons>/power/command`; supported
+payloads are `wake`, `resume`, `idle`, `disconnect`, `enable`, and `disable`.
+
+`idle` is deliberately explicit: a dashboard/script should issue it only after playback
+has stopped. The bridge waits for `idle_timeout`, blocks automatic reconnect, and
+disconnects Bluetooth. It does **not** send a BLE power-off command. The speaker's own
+standby timer remains responsible for power-down.
+
+For a UE BOOM 2, the verified wake characteristic is service
+`757ed3e4-1828-4a0c-8362-c229c3a6da72`, characteristic
+`c6d6dc0d-07f5-47ef-9b59-630622b01fd3`. The verified payload is the controlling
+adapter MAC in forward byte order followed by `01`. Example adapter
+`8C:68:AB:E0:3F:F6` becomes `140 104 171 224 63 246 1` in `bluetoothctl` syntax.
+A BLE disconnect directly after this write can accompany a successful wake; Classic
+audio reconnection is the verification step. This path stays disabled by default.
+
+No BLE power-off payload is implemented or claimed to be verified.
 | `extra_speakers` | Optional list of additional speakers (`mac` + `name` each), editable straight from the Configuration tab. See [Multiple speakers](#multiple-speakers). | *(empty)* |
 
 ## Native `media_player` output (DLNA/UPnP)

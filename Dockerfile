@@ -87,6 +87,7 @@ RUN apk add --no-cache --virtual .gmrender-build-deps \
 
 # --- Copie de nos fichiers dans l'image ---
 COPY run.sh /run.sh
+COPY lib/power-manager.sh /opt/btui/lib/power-manager.sh
 COPY mpd.conf.template /etc/mpd.conf.template
 # On copie un "modèle" (template) de config MPD, pas la config finale :
 # le nom exact du sink Bluetooth dépend de l'adresse MAC configurée par
@@ -99,7 +100,7 @@ COPY webui/ /opt/btui/
 # elle-même (www/, avec la page et les scripts CGI). Voir run.sh, étape
 # 1ter.
 
-RUN chmod a+x /run.sh /opt/btui/www/cgi-bin/*.cgi
+RUN chmod a+x /run.sh /opt/btui/lib/power-manager.sh /opt/btui/www/cgi-bin/*.cgi
 # Rend les scripts exécutables (obligatoire, sinon le conteneur refusera
 # de lancer run.sh, et httpd refusera d'exécuter les scripts CGI de la
 # page d'appairage).

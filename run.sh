@@ -542,6 +542,26 @@ if [ "$(bashio::config 'battery_mqtt_enabled' 2>/dev/null || echo false)" = "tru
     fi
 fi
 
+# Optional v2.6.2 controller. Disabled by default, so existing deployments
+# keep their established reconnect behavior until explicitly enabled.
+if [ "$(bashio::config 'power_management_enabled' 2>/dev/null || echo false)" = "true" ] \
+    || [ "$(bashio::config 'battery_mqtt_enabled' 2>/dev/null || echo false)" = "true" ]; then
+    PM_ENABLED=$(bashio::config 'power_management_enabled' 2>/dev/null || echo false)
+    PM_IDLE_TIMEOUT=$(bashio::config 'idle_timeout' 2>/dev/null || echo 300)
+    PM_BLE_WAKE=$(bashio::config 'ble_wake_enabled' 2>/dev/null || echo false)
+    PM_ADAPTER_MAC=$(bashio::config 'ble_adapter_mac' 2>/dev/null || echo '')
+    PM_MQTT_HOST=$(bashio::config 'battery_mqtt_host' 2>/dev/null || echo '')
+    PM_MQTT_PORT=$(bashio::config 'battery_mqtt_port' 2>/dev/null || echo 1883)
+    PM_MQTT_USER=$(bashio::config 'battery_mqtt_username' 2>/dev/null || echo '')
+    PM_MQTT_PASS=$(bashio::config 'battery_mqtt_password' 2>/dev/null || echo '')
+    PM_MAC="${BT_MAC}" PM_NAME="${SPEAKER_NAME}" PM_ENABLED="${PM_ENABLED}" \
+        PM_IDLE_TIMEOUT="${PM_IDLE_TIMEOUT}" PM_BLE_WAKE="${PM_BLE_WAKE}" \
+        PM_ADAPTER_MAC="${PM_ADAPTER_MAC}" PM_MQTT_HOST="${PM_MQTT_HOST}" \
+        PM_MQTT_PORT="${PM_MQTT_PORT}" PM_MQTT_USER="${PM_MQTT_USER}" \
+        PM_MQTT_PASS="${PM_MQTT_PASS}" /opt/btui/lib/power-manager.sh &
+    bashio::log.info "Power-management controller started (enabled=${PM_ENABLED}, BLE wake=${PM_BLE_WAKE})."
+fi
+
 for i in "${!SPEAKERS_MAC[@]}"; do
     monitor_speaker \
         "${SPEAKERS_MAC[i]}" \

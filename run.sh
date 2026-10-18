@@ -548,6 +548,7 @@ if [ "$(bashio::config 'power_management_enabled' 2>/dev/null || echo false)" = 
     || [ "$(bashio::config 'battery_mqtt_enabled' 2>/dev/null || echo false)" = "true" ]; then
     PM_ENABLED=$(bashio::config 'power_management_enabled' 2>/dev/null || echo false)
     PM_IDLE_TIMEOUT=$(bashio::config 'idle_timeout' 2>/dev/null || echo 300)
+    PM_STOP_DEBOUNCE=$(bashio::config 'stop_debounce' 2>/dev/null || echo 10)
     PM_BLE_WAKE=$(bashio::config 'ble_wake_enabled' 2>/dev/null || echo false)
     PM_ADAPTER_MAC=$(bashio::config 'ble_adapter_mac' 2>/dev/null || echo '')
     PM_MQTT_HOST=$(bashio::config 'battery_mqtt_host' 2>/dev/null || echo '')
@@ -555,7 +556,7 @@ if [ "$(bashio::config 'power_management_enabled' 2>/dev/null || echo false)" = 
     PM_MQTT_USER=$(bashio::config 'battery_mqtt_username' 2>/dev/null || echo '')
     PM_MQTT_PASS=$(bashio::config 'battery_mqtt_password' 2>/dev/null || echo '')
     PM_MAC="${BT_MAC}" PM_NAME="${SPEAKER_NAME}" PM_ENABLED="${PM_ENABLED}" \
-        PM_IDLE_TIMEOUT="${PM_IDLE_TIMEOUT}" PM_BLE_WAKE="${PM_BLE_WAKE}" \
+        PM_IDLE_TIMEOUT="${PM_IDLE_TIMEOUT}" PM_STOP_DEBOUNCE="${PM_STOP_DEBOUNCE}" PM_BLE_WAKE="${PM_BLE_WAKE}" \
         PM_ADAPTER_MAC="${PM_ADAPTER_MAC}" PM_MQTT_HOST="${PM_MQTT_HOST}" \
         PM_MQTT_PORT="${PM_MQTT_PORT}" PM_MQTT_USER="${PM_MQTT_USER}" \
         PM_MQTT_PASS="${PM_MQTT_PASS}" /opt/btui/lib/power-manager.sh &

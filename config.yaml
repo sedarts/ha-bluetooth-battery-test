@@ -190,6 +190,7 @@ options:
   battery_mqtt_password: ""
   power_management_enabled: false
   idle_timeout: 300
+  stop_debounce: 10
   ble_wake_enabled: false
   ble_adapter_mac: ""
   # bluetooth_mac vide par défaut : depuis 2.4.0, c'est le point de départ
@@ -215,6 +216,7 @@ schema:
   battery_mqtt_password: "password?"
   power_management_enabled: "bool?"
   idle_timeout: "int(60,3600)?"
+  stop_debounce: "int(1,120)?"
   ble_wake_enabled: "bool?"
   ble_adapter_mac: "match(^$|^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$)?"
   bluetooth_mac: "match(^(([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})?$)?"

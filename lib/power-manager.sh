@@ -4,16 +4,22 @@
 # disconnect only, allowing speakers with their own sleep timer to power down.
 set -u -o pipefail
 
-: "${PM_MAC:?}" "${PM_NAME:?}" "${PM_ENABLED:=false}" "${PM_IDLE_TIMEOUT:=300}"
+: "${PM_MAC:?}" "${PM_NAME:?}" "${PM_ENABLED:=false}" "${PM_IDLE_TIMEOUT:=300}" "${PM_STOP_DEBOUNCE:=10}"
 : "${PM_BLE_WAKE:=false}" "${PM_ADAPTER_MAC:=}" "${PM_MQTT_HOST:=}"
 : "${PM_MQTT_PORT:=1883}" "${PM_MQTT_USER:=}" "${PM_MQTT_PASS:=}"
+
+[[ "${PM_IDLE_TIMEOUT}" =~ ^[0-9]+$ ]] || PM_IDLE_TIMEOUT=300
+[[ "${PM_STOP_DEBOUNCE}" =~ ^[0-9]+$ ]] || PM_STOP_DEBOUNCE=10
 
 id=${PM_MAC//:/}; id=${id,,}
 prefix="bluetooth_audio_bridge/${id}/power"
 command_topic="${prefix}/command"
+playback_topic="${prefix}/playback"
 state_topic="${prefix}/state"
 management_topic="${prefix}/management"
 idle_deadline=0
+stop_debounce_deadline=0
+stop_candidate=""
 mode="disabled"
 
 mqtt_args=(-h "${PM_MQTT_HOST}" -p "${PM_MQTT_PORT}")
@@ -53,7 +59,12 @@ clear_discovery() {
 }
 
 wake() {
+  if [ "${idle_deadline}" -gt 0 ] || [ "${stop_debounce_deadline}" -gt 0 ]; then
+    log "idle timer cancelled by wake/resume"
+  fi
   idle_deadline=0
+  stop_debounce_deadline=0
+  stop_candidate=""
   # run.sh recognises this existing pause marker and will therefore not race
   # our deliberate disconnect with its legacy reconnect loop.
   rm -f "/tmp/btui/paused/${PM_MAC^^}"
@@ -83,14 +94,49 @@ enter_idle() {
   [ "${PM_ENABLED}" = true ] || { publish "disabled"; return; }
   idle_deadline=$(( $(date +%s) + PM_IDLE_TIMEOUT ))
   mode="idle_pending"; publish "${mode}"
+  log "idle timer started for ${PM_IDLE_TIMEOUT}s after player state ${1:-explicit}"
+}
+
+handle_playback() {
+  local playback_state="$1"
+  log "player state received: ${playback_state}"
+  case "${playback_state}" in
+    playing)
+      if [ "${idle_deadline}" -gt 0 ] || [ "${stop_debounce_deadline}" -gt 0 ]; then
+        log "idle timer cancelled because player is playing"
+      fi
+      idle_deadline=0
+      stop_debounce_deadline=0
+      stop_candidate=""
+      mode="connected"; publish "${mode}"
+      ;;
+    paused|idle|off|stopped)
+      [ "${PM_ENABLED}" = true ] || { log "player stop state ignored: power management is disabled"; return; }
+      if [ "${idle_deadline}" -gt 0 ]; then
+        log "idle timer already running; repeated player state ${playback_state} ignored"
+        return
+      fi
+      if [ "${stop_debounce_deadline}" -gt 0 ]; then
+        log "stop debounce already active; repeated player state ${playback_state} ignored"
+        return
+      fi
+      stop_candidate="${playback_state}"
+      stop_debounce_deadline=$(( $(date +%s) + PM_STOP_DEBOUNCE ))
+      log "player is ${playback_state}; waiting ${PM_STOP_DEBOUNCE}s before starting idle timer"
+      ;;
+    unavailable|unknown)
+      log "player state ${playback_state} ignored; it is not evidence that playback stopped"
+      ;;
+    *) log "ignored unsupported player state: ${playback_state}" ;;
+  esac
 }
 
 handle() {
   case "$1" in
     wake|resume) wake ;;
-    idle|disconnect) enter_idle ;;
+    idle|disconnect) enter_idle explicit_command ;;
     enable) PM_ENABLED=true; publish_management enabled; mode="connected"; publish "${mode}" ;;
-    disable) PM_ENABLED=false; idle_deadline=0; publish_management disabled; mode="disabled"; publish "${mode}" ;;
+    disable) PM_ENABLED=false; idle_deadline=0; stop_debounce_deadline=0; stop_candidate=""; publish_management disabled; mode="disabled"; publish "${mode}" ;;
     *) log "ignored unknown command" ;;
   esac
 }
@@ -101,16 +147,35 @@ publish_discovery
 [ "${PM_ENABLED}" = true ] && publish_management enabled || publish_management disabled
 
 while true; do
-  command=$(timeout 1 mosquitto_sub "${mqtt_args[@]}" -t "${command_topic}" -C 1 2>/dev/null || true)
-  [ -n "${command}" ] && handle "${command}"
+  message=$(timeout 1 mosquitto_sub "${mqtt_args[@]}" -t "${command_topic}" -t "${playback_topic}" -v -C 1 2>/dev/null || true)
+  case "${message}" in
+    "${command_topic} "*) handle "${message#"${command_topic} "}" ;;
+    "${playback_topic} "*) handle_playback "${message#"${playback_topic} "}" ;;
+    "") ;;
+    *) log "ignored malformed MQTT message" ;;
+  esac
+  if [ "${stop_debounce_deadline}" -gt 0 ] && [ "$(date +%s)" -ge "${stop_debounce_deadline}" ]; then
+    stop_debounce_deadline=0
+    enter_idle "${stop_candidate}"
+    stop_candidate=""
+  fi
   if [ "${idle_deadline}" -gt 0 ] && [ "$(date +%s)" -ge "${idle_deadline}" ]; then
     idle_deadline=0
     mkdir -p /tmp/btui/paused
     printf '0\n' > "/tmp/btui/paused/${PM_MAC^^}"
-    # block both disconnects and keeps the legacy monitor from immediately
-    # recreating A2DP. Pairing remains intact and wake() reverses this.
-    bluetoothctl block "${PM_MAC}" >/dev/null 2>&1 || true
+    log "reconnect pause marker set before idle disconnect"
+    if bluetoothctl disconnect "${PM_MAC}" >/dev/null 2>&1; then
+      log "A2DP disconnected after idle timeout"
+    else
+      log "A2DP disconnect request failed or speaker was already disconnected"
+    fi
+    # Block after the explicit disconnect as a second line of defence against
+    # the legacy monitor. Pairing remains intact and wake() reverses this.
+    if bluetoothctl block "${PM_MAC}" >/dev/null 2>&1; then
+      log "reconnect blocked after idle timeout"
+    else
+      log "failed to block reconnect after idle timeout"
+    fi
     mode="idle_disconnected"; publish "${mode}"
-    log "A2DP/Bluetooth disconnect requested after idle timeout"
   fi
 done

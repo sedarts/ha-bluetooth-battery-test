@@ -1,0 +1,28 @@
+alias: UE BOOM 2 – Wiedergabestatus an Bluetooth Audio Bridge
+description: >-
+  Publishes only semantic state changes of the real HA player. UPnP/DLNA
+  requests do not trigger this automation and therefore cannot reset idle.
+triggers:
+  - trigger: state
+    entity_id: media_player.ue_boom_2
+    id: player_state
+  - trigger: homeassistant
+    event: start
+    id: ha_start
+actions:
+  - if:
+      - condition: trigger
+        id: ha_start
+    then:
+      - delay:
+          seconds: 15
+  - variables:
+      player_state: >-
+        {{ states('media_player.ue_boom_2') if trigger.id == 'ha_start'
+           else trigger.to_state.state }}
+  - action: mqtt.publish
+    data:
+      topic: bluetooth_audio_bridge/c0288d82f7bb/power/playback
+      payload: "{{ player_state }}"
+      retain: false
+mode: restart

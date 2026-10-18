@@ -554,7 +554,7 @@ If this add-on has been useful to you, you can support its development:
 [MIT](LICENSE)
 
 [add-repo-shield]: https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg
-[add-repo-badge]: https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fdcybeldesign%2Fha-mpd-bluetooth-bridge
+[add-repo-badge]: https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fsedarts%2Fha-bluetooth-battery-test
 
 
 ### Optional Bluetooth battery sensor (2.6.0 preview)

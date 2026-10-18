@@ -1,6 +1,16 @@
 # Changelog
 
-## 2.6.2
+## 2.6.2-test.2
+- Added automatic idle control driven by semantic state changes of the real
+  Home Assistant player. `playing` cancels idle; debounced `paused`, `idle`,
+  `off`, or `stopped` starts the configured timeout. Repeated stop states do
+  not reset a running timer.
+- On timeout, the reconnect pause marker is written, Bluetooth audio is
+  explicitly disconnected, then BlueZ reconnect blocking is applied. A Home
+  Assistant automation example publishes the current player state after HA
+  startup as well as on later state changes.
+
+## 2.6.2-test.1
 - Added an opt-in MQTT power-management controller for the primary speaker.
   It discovers a Home Assistant switch, wake button, disconnect button and
   connection-state sensor. Existing installs keep the former behavior until

@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.6.2-test.4
+- Added a controlled BLE-to-Classic handover for UE BOOM 2 wake: configurable
+  boot delay, bounded Classic reconnect attempts with backoff, selected BlueZ
+  diagnostics, and an explicit PulseAudio A2DP-profile request.
+- A transient BLE connection is released before Classic handover when present.
+  No pairing is removed.
+- Added a renderer handshake. The wake state becomes `ready` only after both
+  the A2DP sink and a live DLNA renderer are confirmed; otherwise it reports
+  `wake_failed` and leaves reconnect suppressed. A later MQTT `wake` remains
+  possible.
+- Extended the mock smoke suite with delayed-A2DP/Classic-retry and renderer
+  acknowledgement coverage. Idle marker → disconnect → block behaviour is
+  unchanged.
+
 ## 2.6.2-test.3
 - Wake now confirms that the expected PulseAudio A2DP sink exists before it
   reports success or permits the DLNA renderer to become available. A BLE-only

@@ -3,8 +3,43 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+show_failure_logs() {
+  local status="$1" log
+  [ "${status}" -eq 0 ] && return
+  printf '\nSMOKE TEST FAILED (exit %s). Scenario logs follow:\n' "${status}" >&2
+  for log in "$tmp"/*.log; do
+    [ -e "${log}" ] || continue
+    printf '\n----- %s -----\n' "$(basename "${log}")" >&2
+    cat "${log}" >&2 || true
+  done
+}
+cleanup() {
+  local status=$?
+  show_failure_logs "${status}"
+  rm -rf "$tmp"
+  exit "${status}"
+}
+trap cleanup EXIT
 mkdir -p "$tmp/bin"
+
+assert_log_contains() {
+  local scenario="$1" log="$2" expected="$3"
+  if ! grep -Fq -- "${expected}" "${log}"; then
+    printf 'ASSERTION FAILED [%s]: expected log line: %s\n' "${scenario}" "${expected}" >&2
+    return 1
+  fi
+}
+assert_log_excludes() {
+  local scenario="$1" log="$2" unexpected="$3"
+  if grep -Fq -- "${unexpected}" "${log}"; then
+    printf 'ASSERTION FAILED [%s]: unexpected log line: %s\n' "${scenario}" "${unexpected}" >&2
+    return 1
+  fi
+}
+assert_wake_processed() {
+  local scenario="$1" log="$2"
+  assert_log_contains "${scenario}" "${log}" 'command received: wake'
+}
 
 cat >"$tmp/bin/timeout" <<'EOF'
 #!/usr/bin/env bash
@@ -12,6 +47,9 @@ shift; exec "$@"
 EOF
 cat >"$tmp/bin/sleep" <<'EOF'
 #!/usr/bin/env bash
+if [ "${PM_TEST_RENDERER_ACK:-no}" = yes ] && [ -f "${PM_TEST_RENDERER_REQUEST:-}" ]; then
+  printf 'ready\n' > "${PM_TEST_RENDERER_REQUEST}.renderer_ready"
+fi
 exit 0
 EOF
 cat >"$tmp/bin/mosquitto_pub" <<'EOF'
@@ -23,13 +61,19 @@ cat >"$tmp/bin/mosquitto_sub" <<'EOF'
 count=0; [ -f "$PM_TEST_SUB_COUNT" ] && count=$(cat "$PM_TEST_SUB_COUNT")
 count=$((count + 1)); printf '%s' "$count" >"$PM_TEST_SUB_COUNT"
 case "${PM_TEST_SCENARIO}:${count}" in
-  success:1|ble_only:1|gatt_error:1) printf '%s wake\n' "$PM_TEST_COMMAND_TOPIC" ;;
+  success:1|ble_only:1|gatt_error:1|classic_retry:1) printf '%s wake\n' "$PM_TEST_COMMAND_TOPIC" ;;
   success:2|success:3) printf '%s idle\n' "$PM_TEST_PLAYBACK_TOPIC" ;;
 esac
 EOF
 cat >"$tmp/bin/pactl" <<'EOF'
 #!/usr/bin/env bash
-[ "${PM_TEST_A2DP:-no}" = yes ] && printf '1\tbluez_sink.C0_28_8D_82_F7_BB.a2dp_sink\tmodule-bluez5-device.c\n'
+if [ "${1:-}" = list ]; then
+  count=0; [ -f "$PM_TEST_PACTL_COUNT" ] && count=$(cat "$PM_TEST_PACTL_COUNT")
+  count=$((count + 1)); printf '%s' "$count" >"$PM_TEST_PACTL_COUNT"
+  if [ "${PM_TEST_A2DP:-no}" = yes ] && [ "$count" -ge "${PM_TEST_A2DP_AFTER:-1}" ]; then
+    printf '1\tbluez_sink.C0_28_8D_82_F7_BB.a2dp_sink\tmodule-bluez5-device.c\n'
+  fi
+fi
 EOF
 cat >"$tmp/bin/date" <<'EOF'
 #!/usr/bin/env bash
@@ -55,28 +99,33 @@ EOF
 chmod +x "$tmp/bin"/*
 
 run_case() {
-  local scenario="$1" a2dp="$2" loops="$3" ble_error="${4:-no}" log
+  local scenario="$1" a2dp="$2" loops="$3" ble_error="${4:-no}" a2dp_after="${5:-1}" renderer_ack="${6:-no}" log renderer_dir
   log="$tmp/${scenario}.log"
+  renderer_dir="$tmp/${scenario}.renderer"
   PM_TEST_LOG="$log" PM_TEST_SCENARIO="$scenario" PM_TEST_A2DP="$a2dp" PM_TEST_BLE_ERROR="$ble_error" \
-  PM_TEST_SUB_COUNT="$tmp/${scenario}.sub" PM_TEST_INFO_COUNT="$tmp/${scenario}.info" PM_TEST_CLOCK="$tmp/${scenario}.clock" \
+  PM_TEST_A2DP_AFTER="$a2dp_after" PM_TEST_RENDERER_ACK="$renderer_ack" PM_TEST_RENDERER_REQUEST="$renderer_dir/C0:28:8D:82:F7:BB" \
+  PM_TEST_SUB_COUNT="$tmp/${scenario}.sub" PM_TEST_INFO_COUNT="$tmp/${scenario}.info" PM_TEST_PACTL_COUNT="$tmp/${scenario}.pactl" PM_TEST_CLOCK="$tmp/${scenario}.clock" \
   PM_PAUSE_DIR="$tmp/${scenario}.paused" \
   PM_TEST_COMMAND_TOPIC='bluetooth_audio_bridge/c0288d82f7bb/power/command' \
   PM_TEST_PLAYBACK_TOPIC='bluetooth_audio_bridge/c0288d82f7bb/power/playback' PATH="$tmp/bin:$PATH" \
   PM_TEST_MAX_LOOPS="$loops" PM_MAC=C0:28:8D:82:F7:BB PM_NAME='UE BOOM 2' PM_ENABLED=true \
   PM_IDLE_TIMEOUT=2 PM_STOP_DEBOUNCE=1 PM_BLE_WAKE=true PM_ADAPTER_MAC=8C:68:AB:E0:3F:F6 \
-  PM_WAKE_TIMEOUT=3 PM_MQTT_HOST=test "$root/lib/power-manager.sh" >>"$log" 2>&1
+  PM_RENDERER_DIR="$renderer_dir" PM_WAKE_TIMEOUT=20 PM_WAKE_BOOT_DELAY=1 PM_WAKE_RETRY_INTERVAL=1 PM_RENDERER_TIMEOUT=5 PM_MQTT_HOST=test "$root/lib/power-manager.sh" >>"$log" 2>&1
 }
 
-run_case success yes 4
+run_case success yes 4 no 2 yes
 success_log="$tmp/success.log"
-grep -q 'wake command received' "$success_log"
-grep -q 'reconnect pause marker cleared\|reconnect pause marker was not present' "$success_log"
-grep -q 'Bluetooth reconnect block cleared' "$success_log"
-grep -q 'write "140 104 171 224 63 246 1"' "$success_log"
-grep -q 'BLE wake write accepted by bluetoothctl' "$success_log"
-grep -q 'A2DP sink is ready; renderer monitor can publish the DLNA player' "$success_log"
-grep -q 'reconnect pause marker cleared after A2DP wake' "$success_log"
-grep -q 'idle timer already running; repeated player state idle ignored' "$success_log"
+assert_wake_processed success "$success_log"
+assert_log_contains success "$success_log" 'wake command received'
+assert_log_contains success "$success_log" 'Bluetooth reconnect block cleared'
+assert_log_contains success "$success_log" 'write "140 104 171 224 63 246 1"'
+assert_log_contains success "$success_log" 'BLE wake write accepted by bluetoothctl'
+assert_log_contains success "$success_log" 'released transient BLE connection before Classic handover'
+assert_log_contains success "$success_log" 'Classic audio connection attempt 1 accepted'
+assert_log_contains success "$success_log" 'A2DP sink is ready; waiting for the DLNA renderer handover'
+assert_log_contains success "$success_log" 'wake_success: A2DP sink and DLNA renderer are ready'
+assert_log_contains success "$success_log" 'reconnect pause marker cleared after A2DP wake'
+assert_log_contains success "$success_log" 'idle timer already running; repeated player state idle ignored'
 marker_line=$(grep -n 'reconnect pause marker set before idle disconnect' "$success_log" | head -n1 | cut -d: -f1)
 disconnect_line=$(grep -n 'disconnect C0:28:8D:82:F7:BB' "$success_log" | tail -n1 | cut -d: -f1)
 block_line=$(grep -n '^block C0:28:8D:82:F7:BB' "$success_log" | head -n1 | cut -d: -f1)
@@ -84,18 +133,26 @@ block_line=$(grep -n '^block C0:28:8D:82:F7:BB' "$success_log" | head -n1 | cut 
 
 run_case ble_only no 1
 ble_only_log="$tmp/ble_only.log"
-grep -q 'BLE wake write accepted by bluetoothctl' "$ble_only_log"
-grep -q 'wake timed out: no A2DP sink became available within 3s' "$ble_only_log"
-! grep -q 'A2DP sink is ready; renderer monitor can publish the DLNA player' "$ble_only_log"
-grep -q -- '-m wake_failed' "$ble_only_log"
-grep -q 'Bluetooth reconnect remains blocked after failed wake' "$ble_only_log"
+assert_wake_processed ble_only "$ble_only_log"
+assert_log_contains ble_only "$ble_only_log" 'BLE wake write accepted by bluetoothctl'
+assert_log_contains ble_only "$ble_only_log" 'wake timed out: no A2DP sink became available within 20s'
+assert_log_excludes ble_only "$ble_only_log" 'wake_success: A2DP sink and DLNA renderer are ready'
+assert_log_contains ble_only "$ble_only_log" '-m wake_failed'
+assert_log_contains ble_only "$ble_only_log" 'Bluetooth reconnect remains blocked after failed wake'
 [ "$(cat "$tmp/ble_only.paused/C0:28:8D:82:F7:BB")" = 0 ]
 
 run_case gatt_error no 1 yes
 gatt_error_log="$tmp/gatt_error.log"
-grep -q 'BLE wake write was rejected or timed out (bluetoothctl exit 1)' "$gatt_error_log"
-grep -q 'wake timed out: no A2DP sink became available within 3s' "$gatt_error_log"
-grep -q -- '-m wake_failed' "$gatt_error_log"
-grep -q 'Bluetooth reconnect remains blocked after failed wake' "$gatt_error_log"
+assert_wake_processed gatt_error "$gatt_error_log"
+assert_log_contains gatt_error "$gatt_error_log" 'BLE wake write was rejected or timed out (bluetoothctl exit 1)'
+assert_log_contains gatt_error "$gatt_error_log" 'wake timed out: no A2DP sink became available within 20s'
+assert_log_contains gatt_error "$gatt_error_log" '-m wake_failed'
+assert_log_contains gatt_error "$gatt_error_log" 'Bluetooth reconnect remains blocked after failed wake'
+
+run_case classic_retry yes 1 no 2 yes
+classic_retry_log="$tmp/classic_retry.log"
+assert_wake_processed classic_retry "$classic_retry_log"
+assert_log_contains classic_retry "$classic_retry_log" 'Classic audio connection attempt 2 accepted'
+assert_log_contains classic_retry "$classic_retry_log" 'wake_success: A2DP sink and DLNA renderer are ready'
 
 echo 'power-manager smoke test: PASS'

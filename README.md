@@ -248,6 +248,9 @@ with this repository's URL pre-filled, just confirm to add it.
 | `stop_debounce` | Seconds a `paused`, `idle`, `off`, or `stopped` player state must remain current before the idle timer begins. | `10` |
 | `ble_wake_enabled` | Allows the verified UE BOOM 2 BLE wake write when a `wake` command is received. Keep off until validated on this installation. | `false` |
 | `ble_adapter_mac` | Bluetooth adapter MAC used to construct the UE BOOM 2 wake payload. Required when BLE wake is enabled. | *(empty)* |
+| `wake_boot_delay` | Seconds to wait after the accepted BLE frame before attempting Bluetooth Classic. | `5` |
+| `wake_retry_interval` | Initial delay between controlled Classic reconnect attempts; later waits back off, capped at 15 seconds. | `5` |
+| `wake_renderer_timeout` | Maximum time to wait for the monitor to confirm that the DLNA renderer has started after A2DP is ready. | `45` |
 
 ## Opt-in power management (2.6.2)
 
@@ -264,6 +267,13 @@ cancels an idle timer; `paused`, `idle`, `off`, and `stopped` first pass through
 activity. The bridge then blocks reconnects and explicitly disconnects Bluetooth. It
 does **not** send a BLE power-off command; the speaker's own standby timer remains
 responsible for power-down.
+
+For a BLE wake, an accepted GATT write means only that the speaker received the
+power-on request. The bridge waits for Classic Bluetooth, requests the PulseAudio
+`a2dp_sink` profile, and waits for the renderer monitor to acknowledge a live
+`gmediarender` process. Only then is the retained state `ready` published (with a
+`wake_success` log). A failed handover publishes `wake_failed`, keeps reconnect
+suppressed, and can be retried with a later `wake` command.
 
 The radio-start path must send `wake` or `resume` **before** it asks the
 DLNA/Music-Assistant player to play. `playing` only cancels a pending idle timer;

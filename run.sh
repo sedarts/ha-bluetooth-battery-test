@@ -313,7 +313,7 @@ ensure_audio_sink() {
 # d'appairage (bluetoothctl block) est conservé par BlueZ côté hôte. On le
 # lève donc pour toutes les enceintes configurées, sinon une enceinte mise en
 # pause juste avant un redémarrage resterait refusée sans aucune trace.
-rm -rf /tmp/btui/paused
+rm -rf /tmp/btui/paused /tmp/btui/wake
 for i in "${!SPEAKERS_MAC[@]}"; do
     bluetoothctl unblock "${SPEAKERS_MAC[i]}" >/dev/null 2>&1 || true
 done
@@ -351,7 +351,7 @@ done
 # radio Bluetooth physique lui-même, voir vault : test du 2026-09-06).
 monitor_speaker() {
     local mac="$1" name="$2" sink="$3" card="$4" uuid="$5" port="$6"
-    local info renderer_pid=""
+    local info renderer_pid="" wake_request="/tmp/btui/wake/${mac^^}"
     # renderer_pid est une variable LOCALE à cette fonction : chaque appel de
     # monitor_speaker tourne dans son propre processus (le "&" au moment de
     # l'appel, plus bas), donc le renderer_pid d'une enceinte ne peut pas se
@@ -408,6 +408,18 @@ monitor_speaker() {
             --logfile=stdout \
             &
         renderer_pid=$!
+        # The controller creates this request only after verifying the
+        # physical A2DP sink.  Acknowledge only after gmediarender itself is
+        # alive, so a BLE-only wake can never be announced as ready.
+        if [ -f "${wake_request}" ]; then
+            sleep 1
+            if kill -0 "${renderer_pid}" 2>/dev/null; then
+                printf 'ready\n' > "${wake_request}.renderer_ready"
+                bashio::log.info "DLNA renderer handover acknowledged for ${name}." || true
+            else
+                bashio::log.warning "DLNA renderer failed before wake handover could be acknowledged for ${name}." || true
+            fi
+        fi
     }
 
     stop_renderer() {
@@ -554,13 +566,17 @@ if [ "$(bashio::config 'power_management_enabled' 2>/dev/null || echo false)" = 
     PM_STOP_DEBOUNCE=$(bashio::config 'stop_debounce' 2>/dev/null || echo 10)
     PM_BLE_WAKE=$(bashio::config 'ble_wake_enabled' 2>/dev/null || echo false)
     PM_ADAPTER_MAC=$(bashio::config 'ble_adapter_mac' 2>/dev/null || echo '')
+    PM_WAKE_BOOT_DELAY=$(bashio::config 'wake_boot_delay' 2>/dev/null || echo 5)
+    PM_WAKE_RETRY_INTERVAL=$(bashio::config 'wake_retry_interval' 2>/dev/null || echo 5)
+    PM_RENDERER_TIMEOUT=$(bashio::config 'wake_renderer_timeout' 2>/dev/null || echo 45)
     PM_MQTT_HOST=$(bashio::config 'battery_mqtt_host' 2>/dev/null || echo '')
     PM_MQTT_PORT=$(bashio::config 'battery_mqtt_port' 2>/dev/null || echo 1883)
     PM_MQTT_USER=$(bashio::config 'battery_mqtt_username' 2>/dev/null || echo '')
     PM_MQTT_PASS=$(bashio::config 'battery_mqtt_password' 2>/dev/null || echo '')
     PM_MAC="${BT_MAC}" PM_NAME="${SPEAKER_NAME}" PM_ENABLED="${PM_ENABLED}" \
         PM_IDLE_TIMEOUT="${PM_IDLE_TIMEOUT}" PM_STOP_DEBOUNCE="${PM_STOP_DEBOUNCE}" PM_BLE_WAKE="${PM_BLE_WAKE}" \
-        PM_ADAPTER_MAC="${PM_ADAPTER_MAC}" PM_MQTT_HOST="${PM_MQTT_HOST}" \
+        PM_ADAPTER_MAC="${PM_ADAPTER_MAC}" PM_WAKE_BOOT_DELAY="${PM_WAKE_BOOT_DELAY}" \
+        PM_WAKE_RETRY_INTERVAL="${PM_WAKE_RETRY_INTERVAL}" PM_RENDERER_TIMEOUT="${PM_RENDERER_TIMEOUT}" PM_MQTT_HOST="${PM_MQTT_HOST}" \
         PM_MQTT_PORT="${PM_MQTT_PORT}" PM_MQTT_USER="${PM_MQTT_USER}" \
         PM_MQTT_PASS="${PM_MQTT_PASS}" /opt/btui/lib/power-manager.sh &
     bashio::log.info "Power-management controller started (enabled=${PM_ENABLED}, BLE wake=${PM_BLE_WAKE})."

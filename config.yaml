@@ -14,7 +14,7 @@ name: "Bluetooth Audio Bridge 2.6.2 Test"
 # Ancien nom : "Bluetooth Speaker MPD Bridge" (ancien nom encore avant :
 # "MPD JBL Bridge").
 
-version: "2.6.2-test.4"
+version: "2.6.2-test.5"
 # Version de l'add-on. À incrémenter à chaque modification si on veut
 # que le Supervisor propose une "mise à jour" plus tard.
 # Bump en 2.0.0 : changement de nom/slug (rupture de compatibilité pour
@@ -194,8 +194,7 @@ options:
   ble_wake_enabled: false
   ble_adapter_mac: ""
   wake_boot_delay: 5
-  wake_retry_interval: 5
-  wake_renderer_timeout: 45
+  wake_timeout: 90
   # bluetooth_mac vide par défaut : depuis 2.4.0, c'est le point de départ
   # normal d'une première installation (mode configuration, voir schema
   # ci-dessous). L'enceinte est ensuite choisie depuis la page
@@ -223,8 +222,7 @@ schema:
   ble_wake_enabled: "bool?"
   ble_adapter_mac: "match(^$|^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$)?"
   wake_boot_delay: "int(1,30)?"
-  wake_retry_interval: "int(1,15)?"
-  wake_renderer_timeout: "int(10,120)?"
+  wake_timeout: "int(45,180)?"
   bluetooth_mac: "match(^(([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})?$)?"
   # Valide le format d'une adresse MAC Bluetooth (ex: AA:BB:CC:DD:EE:FF) et
   # affiche une erreur claire dans l'UI si l'utilisateur se trompe de format,

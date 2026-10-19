@@ -408,11 +408,14 @@ monitor_speaker() {
             --logfile=stdout \
             &
         renderer_pid=$!
+        acknowledge_wake_renderer
+    }
+
+    acknowledge_wake_renderer() {
         # The controller creates this request only after verifying the
-        # physical A2DP sink.  Acknowledge only after gmediarender itself is
-        # alive, so a BLE-only wake can never be announced as ready.
+        # physical A2DP sink. It can also be called for an already-running
+        # renderer, so a new wake never needs to spawn a duplicate process.
         if [ -f "${wake_request}" ]; then
-            sleep 1
             if kill -0 "${renderer_pid}" 2>/dev/null; then
                 printf 'ready\n' > "${wake_request}.renderer_ready"
                 bashio::log.info "DLNA renderer handover acknowledged for ${name}." || true
@@ -459,6 +462,7 @@ monitor_speaker() {
         # puis relançait une connexion qui échouait forcément (constaté sur
         # un Raspberry Pi 4 le 2026-09-12, BlueZ 5.66 de l'image Alpine 3.18).
         if is_connected; then
+            acknowledge_wake_renderer
             # Reconnectée depuis le dernier passage (ou renderer mort tout
             # seul, ex. crash de gmediarender) : le relancer.
             if [ -z "${renderer_pid}" ] || ! kill -0 "${renderer_pid}" 2>/dev/null; then
@@ -469,6 +473,11 @@ monitor_speaker() {
             stop_renderer
             connect_speaker "${mac}" "${name}" || true
             sleep 2
+            # Use the existing profile-recovery path immediately after the
+            # normal connect attempt. This avoids waiting for another full
+            # monitor interval when BlueZ is already connected but PulseAudio
+            # has not yet exposed its A2DP sink.
+            ensure_audio_sink "${sink}" "${card}"
             if is_connected; then
                 start_renderer
             fi
@@ -567,16 +576,14 @@ if [ "$(bashio::config 'power_management_enabled' 2>/dev/null || echo false)" = 
     PM_BLE_WAKE=$(bashio::config 'ble_wake_enabled' 2>/dev/null || echo false)
     PM_ADAPTER_MAC=$(bashio::config 'ble_adapter_mac' 2>/dev/null || echo '')
     PM_WAKE_BOOT_DELAY=$(bashio::config 'wake_boot_delay' 2>/dev/null || echo 5)
-    PM_WAKE_RETRY_INTERVAL=$(bashio::config 'wake_retry_interval' 2>/dev/null || echo 5)
-    PM_RENDERER_TIMEOUT=$(bashio::config 'wake_renderer_timeout' 2>/dev/null || echo 45)
+    PM_WAKE_TIMEOUT=$(bashio::config 'wake_timeout' 2>/dev/null || echo 90)
     PM_MQTT_HOST=$(bashio::config 'battery_mqtt_host' 2>/dev/null || echo '')
     PM_MQTT_PORT=$(bashio::config 'battery_mqtt_port' 2>/dev/null || echo 1883)
     PM_MQTT_USER=$(bashio::config 'battery_mqtt_username' 2>/dev/null || echo '')
     PM_MQTT_PASS=$(bashio::config 'battery_mqtt_password' 2>/dev/null || echo '')
     PM_MAC="${BT_MAC}" PM_NAME="${SPEAKER_NAME}" PM_ENABLED="${PM_ENABLED}" \
         PM_IDLE_TIMEOUT="${PM_IDLE_TIMEOUT}" PM_STOP_DEBOUNCE="${PM_STOP_DEBOUNCE}" PM_BLE_WAKE="${PM_BLE_WAKE}" \
-        PM_ADAPTER_MAC="${PM_ADAPTER_MAC}" PM_WAKE_BOOT_DELAY="${PM_WAKE_BOOT_DELAY}" \
-        PM_WAKE_RETRY_INTERVAL="${PM_WAKE_RETRY_INTERVAL}" PM_RENDERER_TIMEOUT="${PM_RENDERER_TIMEOUT}" PM_MQTT_HOST="${PM_MQTT_HOST}" \
+        PM_ADAPTER_MAC="${PM_ADAPTER_MAC}" PM_WAKE_BOOT_DELAY="${PM_WAKE_BOOT_DELAY}" PM_WAKE_TIMEOUT="${PM_WAKE_TIMEOUT}" PM_MQTT_HOST="${PM_MQTT_HOST}" \
         PM_MQTT_PORT="${PM_MQTT_PORT}" PM_MQTT_USER="${PM_MQTT_USER}" \
         PM_MQTT_PASS="${PM_MQTT_PASS}" /opt/btui/lib/power-manager.sh &
     bashio::log.info "Power-management controller started (enabled=${PM_ENABLED}, BLE wake=${PM_BLE_WAKE})."

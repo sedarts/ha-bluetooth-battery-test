@@ -7,18 +7,16 @@ set -u -o pipefail
 : "${PM_MAC:?}" "${PM_NAME:?}" "${PM_ENABLED:=false}" "${PM_IDLE_TIMEOUT:=300}" "${PM_STOP_DEBOUNCE:=10}"
 : "${PM_BLE_WAKE:=false}" "${PM_ADAPTER_MAC:=}" "${PM_MQTT_HOST:=}"
 : "${PM_MQTT_PORT:=1883}" "${PM_MQTT_USER:=}" "${PM_MQTT_PASS:=}"
-: "${PM_WAKE_TIMEOUT:=45}"
-: "${PM_WAKE_BOOT_DELAY:=5}" "${PM_WAKE_RETRY_INTERVAL:=5}" "${PM_RENDERER_TIMEOUT:=45}"
+: "${PM_WAKE_TIMEOUT:=90}"
+: "${PM_WAKE_BOOT_DELAY:=5}"
 : "${PM_TEST_MAX_LOOPS:=0}"
 : "${PM_PAUSE_DIR:=/tmp/btui/paused}"
 : "${PM_RENDERER_DIR:=/tmp/btui/wake}"
 
 [[ "${PM_IDLE_TIMEOUT}" =~ ^[0-9]+$ ]] || PM_IDLE_TIMEOUT=300
 [[ "${PM_STOP_DEBOUNCE}" =~ ^[0-9]+$ ]] || PM_STOP_DEBOUNCE=10
-[[ "${PM_WAKE_TIMEOUT}" =~ ^[0-9]+$ ]] || PM_WAKE_TIMEOUT=45
+[[ "${PM_WAKE_TIMEOUT}" =~ ^[0-9]+$ ]] || PM_WAKE_TIMEOUT=90
 [[ "${PM_WAKE_BOOT_DELAY}" =~ ^[0-9]+$ ]] || PM_WAKE_BOOT_DELAY=5
-[[ "${PM_WAKE_RETRY_INTERVAL}" =~ ^[0-9]+$ ]] || PM_WAKE_RETRY_INTERVAL=5
-[[ "${PM_RENDERER_TIMEOUT}" =~ ^[0-9]+$ ]] || PM_RENDERER_TIMEOUT=45
 [[ "${PM_TEST_MAX_LOOPS}" =~ ^[0-9]+$ ]] || PM_TEST_MAX_LOOPS=0
 
 id=${PM_MAC//:/}; id=${id,,}
@@ -45,33 +43,18 @@ a2dp_ready() {
   sinks=$(pactl list short sinks 2>/dev/null) || return 1
   grep -Fq "${sink}" <<<"${sinks}"
 }
-bluez_state() {
-  bluetoothctl info "${PM_MAC}" 2>/dev/null | awk '/^[[:space:]]*(Connected|Paired|Blocked|ServicesResolved):/ { sub(/^[[:space:]]*/, ""); printf "%s;", $0 }'
-}
-request_a2dp_profile() {
-  local card="bluez_card.${PM_MAC//:/_}"
-  if pactl set-card-profile "${card}" a2dp_sink >/dev/null 2>&1; then
-    log "requested PulseAudio A2DP profile for ${card}"
-  else
-    log "PulseAudio A2DP profile is not available yet for ${card}"
-  fi
-}
-finish_wake_when_renderer_ready() {
-  local pause_marker="$1" renderer_request="$2" renderer_ready="${2}.renderer_ready" deadline
+request_renderer_handover() {
+  local renderer_request="$1" renderer_ready="${1}.renderer_ready"
   rm -f "${renderer_ready}"
   if mkdir -p "${PM_RENDERER_DIR}" && printf 'requested\n' > "${renderer_request}"; then
-    log "renderer start requested after A2DP readiness"
+    log "renderer handover requested; normal reconnect monitor owns Classic/A2DP connection"
   else
-    log "could not request renderer start after A2DP readiness"
+    log "could not request renderer handover"
     return 1
   fi
-  if rm -f "${pause_marker}"; then
-    log "reconnect pause marker cleared after A2DP wake"
-  else
-    log "failed to clear reconnect pause marker after A2DP wake"
-  fi
-  mode="renderer_starting"; publish "${mode}"
-  deadline=$(( $(date +%s) + PM_RENDERER_TIMEOUT ))
+}
+wait_for_renderer_ready() {
+  local renderer_request="$1" renderer_ready="${1}.renderer_ready" deadline="$2"
   while [ "$(date +%s)" -lt "${deadline}" ]; do
     if [ -f "${renderer_ready}" ]; then
       rm -f "${renderer_request}" "${renderer_ready}"
@@ -81,23 +64,14 @@ finish_wake_when_renderer_ready() {
     fi
     sleep 1
   done
-  log "wake timed out: DLNA renderer did not confirm readiness within ${PM_RENDERER_TIMEOUT}s"
+  log "wake timed out: DLNA renderer did not confirm readiness within ${PM_WAKE_TIMEOUT}s"
   rm -f "${renderer_request}" "${renderer_ready}"
   return 1
 }
 fail_wake() {
-  local pause_marker="$1"
-  mkdir -p "${PM_PAUSE_DIR}"
-  if printf '0\n' > "${pause_marker}"; then
-    log "reconnect remains paused after failed wake"
-  else
-    log "failed to retain reconnect pause after failed wake"
-  fi
-  if timeout 10 bluetoothctl block "${PM_MAC}" >/dev/null 2>&1; then
-    log "Bluetooth reconnect remains blocked after failed wake"
-  else
-    log "failed to keep Bluetooth reconnect blocked after failed wake"
-  fi
+  local renderer_request="$1"
+  rm -f "${renderer_request}" "${renderer_request}.renderer_ready"
+  log "wake failed without re-blocking Bluetooth; normal reconnect monitor remains available"
   mode="wake_failed"; publish "${mode}"
 }
 
@@ -129,7 +103,7 @@ clear_discovery() {
 }
 
 wake() {
-  local pause_marker renderer_request deadline attempt retry_delay state
+  local pause_marker renderer_request deadline
   pause_marker="${PM_PAUSE_DIR}/${PM_MAC^^}"
   renderer_request="${PM_RENDERER_DIR}/${PM_MAC^^}"
   log "wake command received"
@@ -155,9 +129,9 @@ wake() {
   else
     log "Bluetooth unblock request failed or device was already unblocked"
   fi
-  # Keep the legacy monitor from issuing a second connect while BLE wake and
-  # the Classic/A2DP transition are in progress. wake() removes this marker
-  # only once it has observed the A2DP sink itself.
+  # Keep the monitor from issuing a second connection only while the BLE
+  # GATT write and the short BOOM boot delay are in progress. It is released
+  # before Classic/A2DP so it remains the sole connection owner.
   if mkdir -p "${PM_PAUSE_DIR}" && printf '%s\n' "$(( $(date +%s) + PM_WAKE_TIMEOUT + 15 ))" > "${pause_marker}"; then
     log "reconnect monitor paused while wake waits for A2DP"
   else
@@ -165,7 +139,11 @@ wake() {
   fi
   if connected && a2dp_ready; then
     log "A2DP is already available; requesting renderer readiness"
-    finish_wake_when_renderer_ready "${pause_marker}" "${renderer_request}" || fail_wake "${pause_marker}"
+    request_renderer_handover "${renderer_request}" || { fail_wake "${renderer_request}"; return; }
+    rm -f "${pause_marker}" || log "failed to clear reconnect pause marker after A2DP wake"
+    deadline=$(( $(date +%s) + PM_WAKE_TIMEOUT ))
+    mode="renderer_starting"; publish "${mode}"
+    wait_for_renderer_ready "${renderer_request}" "${deadline}" || fail_wake "${renderer_request}"
     return
   fi
   if [ "${PM_BLE_WAKE}" = true ] && [ -n "${PM_ADAPTER_MAC}" ]; then
@@ -193,49 +171,35 @@ wake() {
       log "BLE wake write was rejected or timed out (bluetoothctl exit ${ble_status})"
     fi
     # The speaker needs time to boot its Classic radio after accepting the
-    # GATT frame.  Releasing a transient LE link avoids asking BlueZ to use
-    # the already-connected BLE bearer for the following Classic request.
+    # GATT frame. The normal reconnect monitor subsequently asks BlueZ for
+    # the missing bearer using its established connect_speaker() routine.
     log "waiting ${PM_WAKE_BOOT_DELAY}s for the speaker to boot Classic audio"
     sleep "${PM_WAKE_BOOT_DELAY}"
-    if connected; then
-      if timeout 8 bluetoothctl disconnect "${PM_MAC}" >/dev/null 2>&1; then
-        log "released transient BLE connection before Classic handover"
-      else
-        log "transient BLE release was not accepted; continuing with Classic handover"
-      fi
-      sleep 1
-    else
-      log "BLE link already released by the speaker before Classic handover"
-    fi
   else
     log "BLE wake skipped (ble_wake_enabled=${PM_BLE_WAKE}, adapter MAC configured=$([ -n "${PM_ADAPTER_MAC}" ] && echo yes || echo no))"
   fi
+  request_renderer_handover "${renderer_request}" || { fail_wake "${renderer_request}"; return; }
+  # An explicit wake/resume is the only power-manager action that lifts an
+  # idle/manual pause. Once removed, monitor_speaker() alone reconnects.
+  if rm -f "${pause_marker}"; then
+    log "normal reconnect monitor released after BLE wake"
+  else
+    log "failed to release normal reconnect monitor after BLE wake"
+  fi
   mode="waiting_for_classic"; publish "${mode}"
   deadline=$(( $(date +%s) + PM_WAKE_TIMEOUT ))
-  attempt=0
   while [ "$(date +%s)" -lt "${deadline}" ]; do
-    attempt=$((attempt + 1))
-    state=$(bluez_state)
-    log "Classic handover attempt ${attempt}; BlueZ state: ${state:-unavailable}"
-    if timeout 12 bluetoothctl connect "${PM_MAC}" >/dev/null 2>&1; then
-      log "Classic audio connection attempt ${attempt} accepted"
-    else
-      log "Classic audio connection attempt ${attempt} not accepted; retrying while within ${PM_WAKE_TIMEOUT}s budget"
-    fi
-    request_a2dp_profile
     if connected && a2dp_ready; then
       mode="waiting_for_a2dp"; publish "${mode}"
       log "A2DP sink is ready; waiting for the DLNA renderer handover"
-      finish_wake_when_renderer_ready "${pause_marker}" "${renderer_request}" || fail_wake "${pause_marker}"
+      mode="renderer_starting"; publish "${mode}"
+      wait_for_renderer_ready "${renderer_request}" "${deadline}" || fail_wake "${renderer_request}"
       return
     fi
-    retry_delay=$(( PM_WAKE_RETRY_INTERVAL * attempt ))
-    [ "${retry_delay}" -gt 15 ] && retry_delay=15
-    log "A2DP sink is not ready yet; next Classic attempt in ${retry_delay}s"
-    sleep "${retry_delay}"
+    sleep 1
   done
   log "wake timed out: no A2DP sink became available within ${PM_WAKE_TIMEOUT}s"
-  fail_wake "${pause_marker}"
+  fail_wake "${renderer_request}"
 }
 
 enter_idle() {

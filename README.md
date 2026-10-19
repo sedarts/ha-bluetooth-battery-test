@@ -249,8 +249,7 @@ with this repository's URL pre-filled, just confirm to add it.
 | `ble_wake_enabled` | Allows the verified UE BOOM 2 BLE wake write when a `wake` command is received. Keep off until validated on this installation. | `false` |
 | `ble_adapter_mac` | Bluetooth adapter MAC used to construct the UE BOOM 2 wake payload. Required when BLE wake is enabled. | *(empty)* |
 | `wake_boot_delay` | Seconds to wait after the accepted BLE frame before attempting Bluetooth Classic. | `5` |
-| `wake_retry_interval` | Initial delay between controlled Classic reconnect attempts; later waits back off, capped at 15 seconds. | `5` |
-| `wake_renderer_timeout` | Maximum time to wait for the monitor to confirm that the DLNA renderer has started after A2DP is ready. | `45` |
+| `wake_timeout` | Total observation period after BLE wake. The default covers BOOM boot time plus two 30-second reconnect-monitor cycles. | `90` |
 
 ## Opt-in power management (2.6.2)
 
@@ -269,11 +268,12 @@ does **not** send a BLE power-off command; the speaker's own standby timer remai
 responsible for power-down.
 
 For a BLE wake, an accepted GATT write means only that the speaker received the
-power-on request. The bridge waits for Classic Bluetooth, requests the PulseAudio
-`a2dp_sink` profile, and waits for the renderer monitor to acknowledge a live
-`gmediarender` process. Only then is the retained state `ready` published (with a
-`wake_success` log). A failed handover publishes `wake_failed`, keeps reconnect
-suppressed, and can be retried with a later `wake` command.
+power-on request. After the short boot delay, the bridge releases its reconnect
+pause and lets the existing monitor perform its normal `connect_speaker()` and
+PulseAudio profile recovery. Only after the A2DP sink and a live `gmediarender`
+process are confirmed is the retained state `ready` published (with a
+`wake_success` log). A failed observation publishes `wake_failed` without blocking
+Bluetooth again, so the ordinary reconnect monitor remains available.
 
 The radio-start path must send `wake` or `resume` **before** it asks the
 DLNA/Music-Assistant player to play. `playing` only cancels a pending idle timer;

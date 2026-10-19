@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.6.2-test.5
+- Simplified the BLE wake handover: after the verified GATT write, the power
+  manager releases the existing reconnect monitor instead of competing with it
+  through a second Classic/A2DP connection loop.
+- The monitor remains the sole owner of `connect_speaker()`, PulseAudio profile
+  recovery, and DLNA renderer start. Its profile recovery now runs immediately
+  after its normal connection attempt rather than waiting for another cycle.
+- Wake waits up to 90 seconds by default for both A2DP and renderer readiness.
+  A timeout publishes `wake_failed` but does not re-block Bluetooth or create an
+  indefinite pause, so a later normal reconnect or explicit wake remains possible.
+
 ## 2.6.2-test.4
 - Added a controlled BLE-to-Classic handover for UE BOOM 2 wake: configurable
   boot delay, bounded Classic reconnect attempts with backoff, selected BlueZ

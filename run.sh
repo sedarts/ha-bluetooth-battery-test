@@ -58,7 +58,7 @@ DEFAULT_VOLUME=$(bashio::config 'default_volume')
 # est détecté muet ou à 0% (voir ensure_audio_sink, étape 4bis). Par défaut
 # 70 (voir config.yaml).
 
-RENDERER_VOLUME=100
+RENDERER_VOLUME=30
 if bashio::config.has_value 'renderer_volume'; then
     RENDERER_VOLUME=$(bashio::config 'renderer_volume')
 fi
@@ -69,12 +69,9 @@ RENDERER_INITIAL_DB=$(awk -v v="${RENDERER_VOLUME}" 'BEGIN { printf "%.2f", (v -
 # 100 à chaque fois (GitHub issue #9). L'échelle UPnP de gmediarender est
 # de 0,4 dB par graduation (curseur 80 = -8 dB, mesuré sur le Pi le
 # 2026-10-04) : ce calcul place donc le curseur de Home Assistant
-# exactement sur renderer_volume. Valeur par défaut 100 = 0.00 dB, donc
-# l'ancien comportement exact : option facultative dans le schema, et
-# repli à 100 si une configuration existante ne la contient pas. Distinct
-# de default_volume (sink PulseAudio), volontairement : réutiliser
-# default_volume (70 par défaut) aurait rendu tout le monde nettement moins
-# fort après la mise à jour.
+# exactement sur renderer_volume. Valeur par défaut 30 = -28.00 dB : un
+# redémarrage/reconnexion ne peut donc pas relancer un flux à 100 %. Cette
+# option reste distincte de default_volume (sink PulseAudio).
 
 # --- 1ter. Page d'appairage Bluetooth (ingress, 2.4.0) ---
 # Petit serveur web (httpd de busybox-extras) qui sert la page ouverte
@@ -362,9 +359,15 @@ monitor_speaker() {
     # même partout.
 
     is_connected() {
-        local i
+        local i sinks
         i=$(bluetoothctl info "${mac}" 2>/dev/null) || true
-        grep -q "Connected: yes" <<<"${i}"
+        # A UE BOOM 2 can stay connected over BLE while its Classic/A2DP
+        # audio bearer is absent. BlueZ's generic Connected flag alone is
+        # therefore not sufficient to advertise or keep a DLNA renderer.
+        # The A2DP PulseAudio sink is the authoritative readiness signal.
+        grep -q "Connected: yes" <<<"${i}" || return 1
+        sinks=$(pactl list short sinks 2>/dev/null) || return 1
+        grep -Fq "${sink}" <<<"${sinks}"
     }
 
     # Pause demandée depuis la page d'appairage (GitHub issue #8) : un fichier
@@ -450,7 +453,7 @@ monitor_speaker() {
                 start_renderer
             fi
         else
-            bashio::log.warning "${name} disconnected, attempting to reconnect..." || true
+            bashio::log.warning "${name} has no ready A2DP sink, attempting to reconnect..." || true
             stop_renderer
             connect_speaker "${mac}" "${name}" || true
             sleep 2

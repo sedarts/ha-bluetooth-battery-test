@@ -7,9 +7,14 @@ set -u -o pipefail
 : "${PM_MAC:?}" "${PM_NAME:?}" "${PM_ENABLED:=false}" "${PM_IDLE_TIMEOUT:=300}" "${PM_STOP_DEBOUNCE:=10}"
 : "${PM_BLE_WAKE:=false}" "${PM_ADAPTER_MAC:=}" "${PM_MQTT_HOST:=}"
 : "${PM_MQTT_PORT:=1883}" "${PM_MQTT_USER:=}" "${PM_MQTT_PASS:=}"
+: "${PM_WAKE_TIMEOUT:=45}"
+: "${PM_TEST_MAX_LOOPS:=0}"
+: "${PM_PAUSE_DIR:=/tmp/btui/paused}"
 
 [[ "${PM_IDLE_TIMEOUT}" =~ ^[0-9]+$ ]] || PM_IDLE_TIMEOUT=300
 [[ "${PM_STOP_DEBOUNCE}" =~ ^[0-9]+$ ]] || PM_STOP_DEBOUNCE=10
+[[ "${PM_WAKE_TIMEOUT}" =~ ^[0-9]+$ ]] || PM_WAKE_TIMEOUT=45
+[[ "${PM_TEST_MAX_LOOPS}" =~ ^[0-9]+$ ]] || PM_TEST_MAX_LOOPS=0
 
 id=${PM_MAC//:/}; id=${id,,}
 prefix="bluetooth_audio_bridge/${id}/power"
@@ -30,6 +35,11 @@ log() { echo "[power-manager] $*"; }
 publish() { timeout 8 mosquitto_pub "${mqtt_args[@]}" -t "${state_topic}" -m "$1" -r >/dev/null 2>&1 || log "MQTT status publish failed"; }
 publish_management() { timeout 8 mosquitto_pub "${mqtt_args[@]}" -t "${management_topic}" -m "$1" -r >/dev/null 2>&1 || log "MQTT management-state publish failed"; }
 connected() { bluetoothctl info "${PM_MAC}" 2>/dev/null | grep -q '^[[:space:]]*Connected: yes'; }
+a2dp_ready() {
+  local sink="bluez_sink.${PM_MAC//:/_}.a2dp_sink" sinks
+  sinks=$(pactl list short sinks 2>/dev/null) || return 1
+  grep -Fq "${sink}" <<<"${sinks}"
+}
 
 publish_discovery() {
   # IDs are stable per Bluetooth MAC. Discovery messages are retained; all
@@ -59,6 +69,9 @@ clear_discovery() {
 }
 
 wake() {
+  local pause_marker
+  pause_marker="${PM_PAUSE_DIR}/${PM_MAC^^}"
+  log "wake command received"
   if [ "${idle_deadline}" -gt 0 ] || [ "${stop_debounce_deadline}" -gt 0 ]; then
     log "idle timer cancelled by wake/resume"
   fi
@@ -67,9 +80,33 @@ wake() {
   stop_candidate=""
   # run.sh recognises this existing pause marker and will therefore not race
   # our deliberate disconnect with its legacy reconnect loop.
-  rm -f "/tmp/btui/paused/${PM_MAC^^}"
-  bluetoothctl unblock "${PM_MAC}" >/dev/null 2>&1 || true
-  if connected; then mode="connected"; publish "${mode}"; return; fi
+  if [ -e "${pause_marker}" ]; then
+    if rm -f "${pause_marker}"; then
+      log "reconnect pause marker cleared"
+    else
+      log "failed to clear reconnect pause marker"
+    fi
+  else
+    log "reconnect pause marker was not present"
+  fi
+  if timeout 10 bluetoothctl unblock "${PM_MAC}" >/dev/null 2>&1; then
+    log "Bluetooth reconnect block cleared"
+  else
+    log "Bluetooth unblock request failed or device was already unblocked"
+  fi
+  # Keep the legacy monitor from issuing a second connect while BLE wake and
+  # the Classic/A2DP transition are in progress. wake() removes this marker
+  # only once it has observed the A2DP sink itself.
+  if mkdir -p "${PM_PAUSE_DIR}" && printf '%s\n' "$(( $(date +%s) + PM_WAKE_TIMEOUT + 15 ))" > "${pause_marker}"; then
+    log "reconnect monitor paused while wake waits for A2DP"
+  else
+    log "failed to pause reconnect monitor during wake"
+  fi
+  if connected && a2dp_ready; then
+    log "A2DP is already available; no BLE wake required"
+    rm -f "${pause_marker}" || log "failed to clear reconnect pause marker after A2DP wake"
+    mode="connected"; publish "${mode}"; return
+  fi
   if [ "${PM_BLE_WAKE}" = true ] && [ -n "${PM_ADAPTER_MAC}" ]; then
     # Verified UE BOOM 2 frame: controlling adapter MAC in forward order + 01.
     # Convert explicitly to decimal because bluetoothctl's gatt menu expects
@@ -78,15 +115,58 @@ wake() {
     local octet
     for octet in ${PM_ADAPTER_MAC//:/ }; do bytes+="$((16#${octet})) "; done
     bytes+="1"
-    log "sending configured BLE wake request"
-    bluetoothctl connect "${PM_MAC}" >/dev/null 2>&1 || true
+    log "BLE wake enabled; requesting GATT connection (payload: ${bytes})"
+    if timeout 12 bluetoothctl connect "${PM_MAC}" >/dev/null 2>&1; then
+      log "Bluetooth connection request for BLE wake accepted"
+    else
+      log "Bluetooth connection request for BLE wake failed; attempting the configured GATT write once"
+    fi
     sleep 1
-    printf 'menu gatt\nselect-attribute c6d6dc0d-07f5-47ef-9b59-630622b01fd3\nwrite "%s"\nquit\n' "${bytes}" | bluetoothctl >/dev/null 2>&1 || log "BLE wake request was not accepted"
+    local ble_output ble_status
+    ble_output=$(printf 'menu gatt\nselect-attribute c6d6dc0d-07f5-47ef-9b59-630622b01fd3\nwrite "%s"\nquit\n' "${bytes}" | timeout 12 bluetoothctl 2>&1) || ble_status=$?
+    ble_status=${ble_status:-0}
+    if [ "${ble_status}" -eq 0 ] && ! grep -Eqi 'failed|error|invalid|too many|not available' <<<"${ble_output}"; then
+      log "BLE wake write accepted by bluetoothctl; waiting for the speaker to switch to Classic audio"
+    else
+      log "BLE wake write was rejected or timed out (bluetoothctl exit ${ble_status})"
+    fi
     # A successful UE BOOM 2 wake commonly drops the BLE link; do not treat
     # that disconnect as failure. The following Classic connection verifies it.
     sleep 2
+  else
+    log "BLE wake skipped (ble_wake_enabled=${PM_BLE_WAKE}, adapter MAC configured=$([ -n "${PM_ADAPTER_MAC}" ] && echo yes || echo no))"
   fi
-  if bluetoothctl connect "${PM_MAC}" >/dev/null 2>&1; then mode="connected"; else mode="wake_failed"; fi
+  if timeout 12 bluetoothctl connect "${PM_MAC}" >/dev/null 2>&1; then
+    log "Classic audio connection request accepted; waiting up to ${PM_WAKE_TIMEOUT}s for A2DP"
+  else
+    log "Classic audio connection request was not accepted; waiting up to ${PM_WAKE_TIMEOUT}s for A2DP in case BlueZ is still transitioning"
+  fi
+  local deadline=$(( $(date +%s) + PM_WAKE_TIMEOUT ))
+  while [ "$(date +%s)" -lt "${deadline}" ]; do
+    if connected && a2dp_ready; then
+      log "A2DP sink is ready; renderer monitor can publish the DLNA player"
+      if rm -f "${pause_marker}"; then
+        log "reconnect pause marker cleared after A2DP wake"
+      else
+        log "failed to clear reconnect pause marker after A2DP wake"
+      fi
+      mode="connected"; publish "${mode}"; return
+    fi
+    sleep 1
+  done
+  log "wake timed out: no A2DP sink became available within ${PM_WAKE_TIMEOUT}s"
+  mkdir -p "${PM_PAUSE_DIR}"
+  if printf '0\n' > "${pause_marker}"; then
+    log "reconnect remains paused after failed wake"
+  else
+    log "failed to retain reconnect pause after failed wake"
+  fi
+  if timeout 10 bluetoothctl block "${PM_MAC}" >/dev/null 2>&1; then
+    log "Bluetooth reconnect remains blocked after failed wake"
+  else
+    log "failed to keep Bluetooth reconnect blocked after failed wake"
+  fi
+  mode="wake_failed"
   publish "${mode}"
 }
 
@@ -132,6 +212,7 @@ handle_playback() {
 }
 
 handle() {
+  log "command received: $1"
   case "$1" in
     wake|resume) wake ;;
     idle|disconnect) enter_idle explicit_command ;;
@@ -142,10 +223,15 @@ handle() {
 }
 
 if [ -z "${PM_MQTT_HOST}" ]; then log "MQTT not configured; power management unavailable"; exit 0; fi
-trap clear_discovery EXIT INT TERM
+cleanup() { clear_discovery; }
+if [ "${PM_TEST_MAX_LOOPS}" -eq 0 ]; then
+  trap cleanup EXIT
+  trap 'cleanup; exit 0' INT TERM
+fi
 publish_discovery
 [ "${PM_ENABLED}" = true ] && publish_management enabled || publish_management disabled
 
+loop_count=0
 while true; do
   message=$(timeout 1 mosquitto_sub "${mqtt_args[@]}" -t "${command_topic}" -t "${playback_topic}" -v -C 1 2>/dev/null || true)
   case "${message}" in
@@ -161,8 +247,8 @@ while true; do
   fi
   if [ "${idle_deadline}" -gt 0 ] && [ "$(date +%s)" -ge "${idle_deadline}" ]; then
     idle_deadline=0
-    mkdir -p /tmp/btui/paused
-    printf '0\n' > "/tmp/btui/paused/${PM_MAC^^}"
+    mkdir -p "${PM_PAUSE_DIR}"
+    printf '0\n' > "${PM_PAUSE_DIR}/${PM_MAC^^}"
     log "reconnect pause marker set before idle disconnect"
     if bluetoothctl disconnect "${PM_MAC}" >/dev/null 2>&1; then
       log "A2DP disconnected after idle timeout"
@@ -177,5 +263,10 @@ while true; do
       log "failed to block reconnect after idle timeout"
     fi
     mode="idle_disconnected"; publish "${mode}"
+  fi
+  loop_count=$((loop_count + 1))
+  if [ "${PM_TEST_MAX_LOOPS}" -gt 0 ] && [ "${loop_count}" -ge "${PM_TEST_MAX_LOOPS}" ]; then
+    log "test loop limit reached; exiting"
+    exit 0
   fi
 done

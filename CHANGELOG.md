@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.6.2-test.3
+- Wake now confirms that the expected PulseAudio A2DP sink exists before it
+  reports success or permits the DLNA renderer to become available. A BLE-only
+  connection, a rejected GATT write, or an A2DP timeout reports `wake_failed`.
+- Added diagnostic logs for MQTT wake commands, reconnect-marker removal,
+  Bluetooth unblock, BLE write outcome, A2DP readiness, and wake timeout.
+- The legacy reconnect monitor is paused while a wake waits for A2DP, then
+  released only after the sink is ready. A failed wake retains the pause and
+  BlueZ block so it cannot turn into a reconnect loop.
+- The test channel's default renderer volume is now 30, preventing a renderer
+  restart from returning its Home Assistant volume to 100 percent. Existing
+  stored add-on configuration is intentionally not changed by this update.
+- Marked runtime and smoke-test shell scripts executable in Git. The smoke
+  suite covers successful A2DP readiness, BLE-only timeout, rejected GATT
+  write, `wake_failed`, and marker → disconnect → block ordering.
+
 ## 2.6.2-test.2
 - Added automatic idle control driven by semantic state changes of the real
   Home Assistant player. `playing` cancels idle; debounced `paused`, `idle`,

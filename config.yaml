@@ -14,7 +14,7 @@ name: "Bluetooth Audio Bridge 2.6.2 Test"
 # Ancien nom : "Bluetooth Speaker MPD Bridge" (ancien nom encore avant :
 # "MPD JBL Bridge").
 
-version: "2.6.2-test.2"
+version: "2.6.2-test.3"
 # Version de l'add-on. À incrémenter à chaque modification si on veut
 # que le Supervisor propose une "mise à jour" plus tard.
 # Bump en 2.0.0 : changement de nom/slug (rupture de compatibilité pour
@@ -181,7 +181,7 @@ options:
   reconnect_interval: 30
   enable_mpd: true
   default_volume: 70
-  renderer_volume: 100
+  renderer_volume: 30
   extra_speakers: []
   battery_mqtt_enabled: false
   battery_mqtt_host: ""
@@ -259,11 +259,10 @@ schema:
   # Niveau de volume (curseur du media_player dans Home Assistant) auquel
   # le renderer DLNA de chaque enceinte démarre, à chaque démarrage de
   # l'add-on et à chaque reconnexion de l'enceinte (voir run.sh,
-  # RENDERER_INITIAL_DB, GitHub issue #9). Valeur par défaut 100 = ancien
-  # comportement exact (0 dB), donc aucun changement pour qui ne touche pas
-  # à cette option. Facultatif (le "?") pour qu'une configuration existante,
-  # écrite avant l'ajout de cette option, reste valide ; run.sh retombe alors
-  # sur 100. Distinct de default_volume, qui ne concerne que le sink
+  # RENDERER_INITIAL_DB, GitHub issue #9). Valeur par défaut 30 : niveau
+  # prudent pour éviter une reprise à 100 %. Facultatif (le "?") pour qu'une
+  # configuration existante, écrite avant l'ajout de cette option, reste
+  # valide ; run.sh retombe alors sur 30. Distinct de default_volume, qui concerne le sink
   # PulseAudio de l'enceinte.
 
   extra_speakers:

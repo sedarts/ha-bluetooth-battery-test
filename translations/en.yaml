@@ -36,8 +36,8 @@ configuration:
     description: >-
       Volume level (as shown by the media_player's slider in Home
       Assistant) each speaker's media_player starts at, every time the
-      add-on starts or the speaker reconnects. 100 keeps the previous
-      behavior.
+      add-on starts or the speaker reconnects. The safe default is 30;
+      existing configured values are preserved.
   extra_speakers:
     name: Extra speakers
     description: >-

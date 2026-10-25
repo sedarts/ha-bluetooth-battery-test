@@ -96,6 +96,7 @@ if [ "$#" -eq 0 ]; then
     printf 'Failed to write value\n'
     exit 1
   fi
+  printf 'Changing le succeeded\nCharacteristic - UE Boom power\nFlags: write-without-response\n'
 fi
 EOF
 chmod +x "$tmp/bin"/*
@@ -120,8 +121,10 @@ success_log="$tmp/success.log"
 assert_wake_processed success "$success_log"
 assert_log_contains success "$success_log" 'wake command received'
 assert_log_contains success "$success_log" 'Bluetooth reconnect block cleared'
-assert_log_contains success "$success_log" 'write "140 104 171 224 63 246 1"'
-assert_log_contains success "$success_log" 'BLE wake write accepted by bluetoothctl'
+assert_log_contains success "$success_log" 'write "140 104 171 224 63 246 1" 0 command'
+assert_log_contains success "$success_log" 'BLE wake GATT write command submitted; speaker-side effect is not acknowledged'
+assert_log_contains success "$success_log" 'write "140 104 171 224 63 246 2" 0 command'
+assert_log_contains success "$success_log" 'physical power state remains unknown until independently observed'
 assert_log_contains success "$success_log" 'normal reconnect monitor released after BLE wake'
 assert_log_contains success "$success_log" 'A2DP sink is ready; waiting for the DLNA renderer handover'
 assert_log_contains success "$success_log" 'wake_success: A2DP sink and DLNA renderer are ready'
@@ -142,7 +145,7 @@ block_line=$(grep -n '^block C0:28:8D:82:F7:BB' "$success_log" | head -n1 | cut 
 run_case ble_only no 1
 ble_only_log="$tmp/ble_only.log"
 assert_wake_processed ble_only "$ble_only_log"
-assert_log_contains ble_only "$ble_only_log" 'BLE wake write accepted by bluetoothctl'
+assert_log_contains ble_only "$ble_only_log" 'BLE wake GATT write command submitted; speaker-side effect is not acknowledged'
 assert_log_contains ble_only "$ble_only_log" 'wake timed out: no A2DP sink became available within 20s'
 assert_log_excludes ble_only "$ble_only_log" 'wake_success: A2DP sink and DLNA renderer are ready'
 assert_log_contains ble_only "$ble_only_log" '-m wake_failed'
@@ -152,7 +155,7 @@ assert_log_contains ble_only "$ble_only_log" 'wake failed without re-blocking Bl
 run_case gatt_error no 1 yes
 gatt_error_log="$tmp/gatt_error.log"
 assert_wake_processed gatt_error "$gatt_error_log"
-assert_log_contains gatt_error "$gatt_error_log" 'BLE wake write was rejected or timed out (bluetoothctl exit 1)'
+assert_log_contains gatt_error "$gatt_error_log" 'BLE wake GATT operation failed (bluetoothctl exit 1)'
 assert_log_contains gatt_error "$gatt_error_log" 'wake timed out: no A2DP sink became available within 20s'
 assert_log_contains gatt_error "$gatt_error_log" '-m wake_failed'
 assert_log_contains gatt_error "$gatt_error_log" 'wake failed without re-blocking Bluetooth; normal reconnect monitor remains available'

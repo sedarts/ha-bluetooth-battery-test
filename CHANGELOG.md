@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.6.2-test.7
+- Select the LE bearer explicitly and use the UE BOOM power characteristic's
+  reported write-without-response procedure for reverse-engineered `01` wake
+  and `02` power-off frames.
+- Keep wake success gated on A2DP and renderer readiness. Report physical power
+  as unknown after idle because the GATT command has no device acknowledgement
+  or reliable power-state readback.
+- Document that the frame must contain the MAC of a host already paired with
+  the speaker; hardware validation is still required.
+
 ## 2.6.2-test.6
 - Start the DLNA renderer as soon as the existing reconnect monitor observes
   the wake handover request, rather than waiting for the remainder of its

@@ -246,9 +246,9 @@ with this repository's URL pre-filled, just confirm to add it.
 | `power_management_enabled` | Enables the opt-in primary-speaker power controller and its MQTT Discovery entities. Existing reconnect behaviour is unchanged while disabled. | `false` |
 | `idle_timeout` | Delay in seconds after confirmed stopped playback before Bluetooth audio is disconnected. | `300` |
 | `stop_debounce` | Seconds a `paused`, `idle`, `off`, or `stopped` player state must remain current before the idle timer begins. | `10` |
-| `ble_wake_enabled` | Allows the verified UE BOOM 2 BLE wake write when a `wake` command is received. Keep off until validated on this installation. | `false` |
-| `ble_adapter_mac` | Bluetooth adapter MAC used to construct the UE BOOM 2 wake payload. Required when BLE wake is enabled. | *(empty)* |
-| `wake_boot_delay` | Seconds to wait after the accepted BLE frame before attempting Bluetooth Classic. | `5` |
+| `ble_wake_enabled` | Enables reverse-engineered UE BOOM 2 BLE power commands (`01` wake, `02` power-off). Keep off until validated on this speaker and host. | `false` |
+| `ble_adapter_mac` | MAC address of a host already paired with the UE BOOM 2, used in its BLE power frame (often the local adapter, but verify pairing). Required when BLE power control is enabled. | *(empty)* |
+| `wake_boot_delay` | Seconds to wait after submitting the BLE command before observing Bluetooth Classic/A2DP. | `5` |
 | `wake_timeout` | Total observation period after BLE wake. The default covers BOOM boot time plus two 30-second reconnect-monitor cycles. | `90` |
 
 ## Opt-in power management (2.6.2)
@@ -263,12 +263,16 @@ Home Assistant must publish the actual `media_player` state to
 `bluetooth_audio_bridge/<speaker-mac-without-colons>/power/playback`. Only `playing`
 cancels an idle timer; `paused`, `idle`, `off`, and `stopped` first pass through
 `stop_debounce`, then start `idle_timeout`. DLNA/UPnP requests are never treated as
-activity. The bridge then blocks reconnects and explicitly disconnects Bluetooth. It
-does **not** send a BLE power-off command; the speaker's own standby timer remains
-responsible for power-down.
+activity. When BLE power control is enabled, the bridge releases the Classic link
+so BlueZ can select LE, submits the reverse-engineered `02` power-off command, then
+disconnects and blocks reconnection. Because the BOOM power characteristic is write-without-response
+and exposes no reliable physical power-state readback, the bridge publishes
+`power_state_unknown` rather than claiming that the speaker physically turned off.
+When BLE power control is disabled or its paired-host MAC is missing, it only
+disconnects audio and likewise reports the physical state as unknown.
 
-For a BLE wake, an accepted GATT write means only that the speaker received the
-power-on request. After the short boot delay, the bridge releases its reconnect
+For a BLE wake, submitting the GATT write is not proof that the speaker received
+or acted on the power-on request. After the short boot delay, the bridge releases its reconnect
 pause and lets the existing monitor perform its normal `connect_speaker()` and
 PulseAudio profile recovery. Only after the A2DP sink and a live `gmediarender`
 process are confirmed is the retained state `ready` published (with a
@@ -284,15 +288,18 @@ for the normal Bluetooth connection path, then start playback.
 An import-ready example for the HA state relay is in
 [`examples/ue_boom_2_playback_state.yaml`](examples/ue_boom_2_playback_state.yaml).
 
-For a UE BOOM 2, the verified wake characteristic is service
+For a UE BOOM 2, public reverse-engineering reports the power characteristic in
+service
 `757ed3e4-1828-4a0c-8362-c229c3a6da72`, characteristic
-`c6d6dc0d-07f5-47ef-9b59-630622b01fd3`. The verified payload is the controlling
-adapter MAC in forward byte order followed by `01`. Example adapter
+`c6d6dc0d-07f5-47ef-9b59-630622b01fd3`, with a 7-byte payload consisting of a
+previously paired host MAC in forward byte order followed by `01` (on) or `02`
+(off). Example host
 `8C:68:AB:E0:3F:F6` becomes `140 104 171 224 63 246 1` in `bluetoothctl` syntax.
-A BLE disconnect directly after this write can accompany a successful wake; Classic
-audio reconnection is the verification step. This path stays disabled by default.
-
-No BLE power-off payload is implemented or claimed to be verified.
+A BLE disconnect directly after an on-write can accompany a successful wake; Classic
+audio reconnection plus renderer readiness remains the operational wake check. This
+unofficial, reverse-engineered protocol is not guaranteed for every hardware/firmware
+revision and still requires physical validation on the target speaker. It remains
+disabled by default.
 | `extra_speakers` | Optional list of additional speakers (`mac` + `name` each), editable straight from the Configuration tab. See [Multiple speakers](#multiple-speakers). | *(empty)* |
 
 ## Native `media_player` output (DLNA/UPnP)

@@ -53,6 +53,45 @@ request_renderer_handover() {
     return 1
   fi
 }
+
+# The UE BOOM 2 power characteristic is a write-without-response GATT
+# attribute. Select LE explicitly: Device1.Connect on a dual-mode device can
+# otherwise prefer its bonded Classic bearer. The final byte is 01 (on) or
+# 02 (off); the six address bytes must identify a host already paired to BOOM.
+ble_power_command() {
+  local action="$1" command_byte="$2" bytes="" octet output status=0
+  [ -n "${PM_ADAPTER_MAC}" ] || { log "BLE power command unavailable: paired-host MAC is not configured"; return 1; }
+  [ "${action}" = wake ] || [ "${action}" = off ] || return 1
+  for octet in ${PM_ADAPTER_MAC//:/ }; do bytes+="$((16#${octet})) "; done
+  bytes+="$((16#${command_byte}))"
+
+  # Disconnect first so BlueZ can apply PreferredBearer to the next link.
+  bluetoothctl disconnect "${PM_MAC}" >/dev/null 2>&1 || true
+  output=$(printf 'bearer %s le\nconnect %s\nmenu gatt\nselect-attribute c6d6dc0d-07f5-47ef-9b59-630622b01fd3\nattribute-info\nwrite "%s" 0 command\nquit\n' \
+    "${PM_MAC}" "${PM_MAC}" "${bytes}" | timeout 20 bluetoothctl 2>&1) || status=$?
+  if [ "${status}" -ne 0 ] || grep -Eqi 'failed|error|invalid|not permitted|not authorized|unable to find|not connected' <<<"${output}"; then
+    log "BLE ${action} GATT operation failed (bluetoothctl exit ${status}): ${output//$'\n'/; }"
+    bluetoothctl disconnect "${PM_MAC}" >/dev/null 2>&1 || true
+    bluetoothctl bearer "${PM_MAC}" last-seen >/dev/null 2>&1 || true
+    return 1
+  fi
+  if ! grep -Eqi 'PreferredBearer: le|Changing le succeeded' <<<"${output}"; then
+    log "BLE ${action} not sent: BlueZ did not confirm LE bearer selection"
+    bluetoothctl disconnect "${PM_MAC}" >/dev/null 2>&1 || true
+    bluetoothctl bearer "${PM_MAC}" last-seen >/dev/null 2>&1 || true
+    return 1
+  fi
+  if ! grep -Eqi 'write-without-response' <<<"${output}"; then
+    log "BLE ${action} not sent: selected characteristic did not confirm write-without-response capability"
+    bluetoothctl disconnect "${PM_MAC}" >/dev/null 2>&1 || true
+    bluetoothctl bearer "${PM_MAC}" last-seen >/dev/null 2>&1 || true
+    return 1
+  fi
+  log "BLE ${action} GATT write command submitted; speaker-side effect is not acknowledged by this characteristic"
+  bluetoothctl disconnect "${PM_MAC}" >/dev/null 2>&1 || true
+  bluetoothctl bearer "${PM_MAC}" last-seen >/dev/null 2>&1 || true
+  return 0
+}
 wait_for_renderer_ready() {
   local renderer_request="$1" renderer_ready="${1}.renderer_ready" deadline="$2"
   while [ "$(date +%s)" -lt "${deadline}" ]; do
@@ -148,27 +187,10 @@ wake() {
   fi
   if [ "${PM_BLE_WAKE}" = true ] && [ -n "${PM_ADAPTER_MAC}" ]; then
     mode="ble_waking"; publish "${mode}"
-    # Verified UE BOOM 2 frame: controlling adapter MAC in forward order + 01.
-    # Convert explicitly to decimal because bluetoothctl's gatt menu expects
-    # one quoted argument whose tokens are C-style integer values.
-    local bytes=""
-    local octet
-    for octet in ${PM_ADAPTER_MAC//:/ }; do bytes+="$((16#${octet})) "; done
-    bytes+="1"
-    log "BLE wake enabled; requesting GATT connection (payload: ${bytes})"
-    if timeout 12 bluetoothctl connect "${PM_MAC}" >/dev/null 2>&1; then
-      log "Bluetooth connection request for BLE wake accepted"
+    if ble_power_command wake 01; then
+      log "BLE wake command submitted; waiting for the speaker to switch to Classic audio"
     else
-      log "Bluetooth connection request for BLE wake failed; attempting the configured GATT write once"
-    fi
-    sleep 1
-    local ble_output ble_status
-    ble_output=$(printf 'menu gatt\nselect-attribute c6d6dc0d-07f5-47ef-9b59-630622b01fd3\nwrite "%s"\nquit\n' "${bytes}" | timeout 12 bluetoothctl 2>&1) || ble_status=$?
-    ble_status=${ble_status:-0}
-    if [ "${ble_status}" -eq 0 ] && ! grep -Eqi 'failed|error|invalid|too many|not available' <<<"${ble_output}"; then
-      log "BLE wake write accepted by bluetoothctl; waiting for the speaker to switch to Classic audio"
-    else
-      log "BLE wake write was rejected or timed out (bluetoothctl exit ${ble_status})"
+      log "BLE wake command could not be verified as submitted"
     fi
     # The speaker needs time to boot its Classic radio after accepting the
     # GATT frame. The normal reconnect monitor subsequently asks BlueZ for
@@ -189,12 +211,16 @@ wake() {
   mode="waiting_for_classic"; publish "${mode}"
   deadline=$(( $(date +%s) + PM_WAKE_TIMEOUT ))
   while [ "$(date +%s)" -lt "${deadline}" ]; do
-    if connected && a2dp_ready; then
-      mode="waiting_for_a2dp"; publish "${mode}"
-      log "A2DP sink is ready; waiting for the DLNA renderer handover"
-      mode="renderer_starting"; publish "${mode}"
-      wait_for_renderer_ready "${renderer_request}" "${deadline}" || fail_wake "${renderer_request}"
-      return
+    if connected; then
+      if a2dp_ready; then
+        mode="waiting_for_a2dp"; publish "${mode}"
+        log "A2DP sink is ready; waiting for the DLNA renderer handover"
+        mode="renderer_starting"; publish "${mode}"
+        wait_for_renderer_ready "${renderer_request}" "${deadline}" || fail_wake "${renderer_request}"
+        return
+      else
+        mode="a2dp_unavailable"; publish "${mode}"
+      fi
     fi
     sleep 1
   done
@@ -282,6 +308,18 @@ while true; do
     mkdir -p "${PM_PAUSE_DIR}"
     printf '0\n' > "${PM_PAUSE_DIR}/${PM_MAC^^}"
     log "reconnect pause marker set before idle disconnect"
+    if [ "${PM_BLE_WAKE}" = true ] && [ -n "${PM_ADAPTER_MAC}" ]; then
+      if ble_power_command off 02; then
+        mode="power_state_unknown"; publish "${mode}"
+        log "BLE power-off command submitted after idle; physical power state remains unknown until independently observed"
+      else
+        mode="power_state_unknown"; publish "${mode}"
+        log "BLE power-off could not be submitted; physical power state remains unknown"
+      fi
+    else
+      mode="power_state_unknown"; publish "${mode}"
+      log "idle disconnect only; BLE power-off disabled or paired-host MAC missing; physical power state unknown"
+    fi
     if bluetoothctl disconnect "${PM_MAC}" >/dev/null 2>&1; then
       log "A2DP disconnected after idle timeout"
     else
@@ -294,7 +332,9 @@ while true; do
     else
       log "failed to block reconnect after idle timeout"
     fi
-    mode="idle_disconnected"; publish "${mode}"
+    # Link teardown proves only that the Bluetooth connection was dropped;
+    # the BLE power characteristic has no response or status readback.
+    mode="power_state_unknown"; publish "${mode}"
   fi
   loop_count=$((loop_count + 1))
   if [ "${PM_TEST_MAX_LOOPS}" -gt 0 ] && [ "${loop_count}" -ge "${PM_TEST_MAX_LOOPS}" ]; then

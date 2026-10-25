@@ -61,7 +61,7 @@ cat >"$tmp/bin/mosquitto_sub" <<'EOF'
 count=0; [ -f "$PM_TEST_SUB_COUNT" ] && count=$(cat "$PM_TEST_SUB_COUNT")
 count=$((count + 1)); printf '%s' "$count" >"$PM_TEST_SUB_COUNT"
 case "${PM_TEST_SCENARIO}:${count}" in
-  success:1|ble_only:1|gatt_error:1|monitor_handover:1) printf '%s wake\n' "$PM_TEST_COMMAND_TOPIC" ;;
+  success:1|ble_only:1|gatt_error:1|monitor_handover:1|command_property:1|missing_confirmation:1) printf '%s wake\n' "$PM_TEST_COMMAND_TOPIC" ;;
   success:2|success:3) printf '%s idle\n' "$PM_TEST_PLAYBACK_TOPIC" ;;
   playing_cancels_idle:1) printf '%s idle\n' "$PM_TEST_PLAYBACK_TOPIC" ;;
   playing_cancels_idle:2) printf '%s playing\n' "$PM_TEST_PLAYBACK_TOPIC" ;;
@@ -99,13 +99,30 @@ if [ "$#" -eq 0 ]; then
   printf 'Changing le succeeded\nCharacteristic - UE Boom power\nFlags: write-without-response\n'
 fi
 EOF
+cat >"$tmp/bin/gatttool" <<'EOF'
+#!/usr/bin/env bash
+printf 'gatttool %s\n' "$*" >>"$PM_TEST_LOG"
+if [[ " $* " == *' --characteristics '* ]]; then
+  [ "${PM_TEST_GATT_DISCOVERY_FAIL:-no}" = yes ] && { echo 'Connection failed'; exit 0; }
+  printf 'handle: 0x0002, char properties: %s, char value handle: 0x0003, uuid: c6d6dc0d-07f5-47ef-9b59-630622b01fd3\n' "${PM_TEST_GATT_PROPERTIES:-0x08}"
+  exit 0
+fi
+if [ "${PM_TEST_GATT_WRITE_FAIL:-no}" = yes ]; then
+  echo 'Characteristic Write Request failed: Insufficient authentication'
+  exit 0
+fi
+[ "${PM_TEST_GATT_WRITE_NO_ACK:-no}" = yes ] && exit 0
+echo 'Characteristic value was written sucessfully'
+EOF
 chmod +x "$tmp/bin"/*
 
 run_case() {
-  local scenario="$1" a2dp="$2" loops="$3" ble_error="${4:-no}" a2dp_after="${5:-1}" renderer_ack="${6:-no}" log renderer_dir
+  local scenario="$1" a2dp="$2" loops="$3" ble_error="${4:-no}" a2dp_after="${5:-1}" renderer_ack="${6:-no}" log renderer_dir gatt_properties="${7:-0x08}" gatt_write_fail="${8:-${4:-no}}" gatt_write_no_ack="${9:-no}"
   log="$tmp/${scenario}.log"
   renderer_dir="$tmp/${scenario}.renderer"
   PM_TEST_LOG="$log" PM_TEST_SCENARIO="$scenario" PM_TEST_A2DP="$a2dp" PM_TEST_BLE_ERROR="$ble_error" \
+  PM_TEST_GATT_PROPERTIES="$gatt_properties" PM_TEST_GATT_WRITE_FAIL="$gatt_write_fail" \
+  PM_TEST_GATT_WRITE_NO_ACK="$gatt_write_no_ack" \
   PM_TEST_A2DP_AFTER="$a2dp_after" PM_TEST_RENDERER_ACK="$renderer_ack" PM_TEST_RENDERER_REQUEST="$renderer_dir/C0:28:8D:82:F7:BB" \
   PM_TEST_SUB_COUNT="$tmp/${scenario}.sub" PM_TEST_INFO_COUNT="$tmp/${scenario}.info" PM_TEST_PACTL_COUNT="$tmp/${scenario}.pactl" PM_TEST_CLOCK="$tmp/${scenario}.clock" \
   PM_PAUSE_DIR="$tmp/${scenario}.paused" \
@@ -121,9 +138,10 @@ success_log="$tmp/success.log"
 assert_wake_processed success "$success_log"
 assert_log_contains success "$success_log" 'wake command received'
 assert_log_contains success "$success_log" 'Bluetooth reconnect block cleared'
-assert_log_contains success "$success_log" 'write "140 104 171 224 63 246 1" 0 command'
-assert_log_contains success "$success_log" 'BLE wake GATT write command submitted; speaker-side effect is not acknowledged'
-assert_log_contains success "$success_log" 'write "140 104 171 224 63 246 2" 0 command'
+assert_log_contains success "$success_log" '--char-write-req --handle 0x0003 --value=8c68abe03ff601'
+assert_log_contains success "$success_log" 'BLE wake GATT write request confirmed by ATT response; physical speaker action remains unconfirmed'
+assert_log_contains success "$success_log" '--char-write-req --handle 0x0003 --value=8c68abe03ff602'
+assert_log_excludes success "$success_log" 'bearer'
 assert_log_contains success "$success_log" 'physical power state remains unknown until independently observed'
 assert_log_contains success "$success_log" 'normal reconnect monitor released after BLE wake'
 assert_log_contains success "$success_log" 'A2DP sink is ready; waiting for the DLNA renderer handover'
@@ -145,7 +163,7 @@ block_line=$(grep -n '^block C0:28:8D:82:F7:BB' "$success_log" | head -n1 | cut 
 run_case ble_only no 1
 ble_only_log="$tmp/ble_only.log"
 assert_wake_processed ble_only "$ble_only_log"
-assert_log_contains ble_only "$ble_only_log" 'BLE wake GATT write command submitted; speaker-side effect is not acknowledged'
+assert_log_contains ble_only "$ble_only_log" 'BLE wake GATT write request confirmed by ATT response; physical speaker action remains unconfirmed'
 assert_log_contains ble_only "$ble_only_log" 'wake timed out: no A2DP sink became available within 20s'
 assert_log_excludes ble_only "$ble_only_log" 'wake_success: A2DP sink and DLNA renderer are ready'
 assert_log_contains ble_only "$ble_only_log" '-m wake_failed'
@@ -155,7 +173,7 @@ assert_log_contains ble_only "$ble_only_log" 'wake failed without re-blocking Bl
 run_case gatt_error no 1 yes
 gatt_error_log="$tmp/gatt_error.log"
 assert_wake_processed gatt_error "$gatt_error_log"
-assert_log_contains gatt_error "$gatt_error_log" 'BLE wake GATT operation failed (bluetoothctl exit 1)'
+assert_log_contains gatt_error "$gatt_error_log" 'BLE wake GATT write request failed (gatttool exit 0)'
 assert_log_contains gatt_error "$gatt_error_log" 'wake timed out: no A2DP sink became available within 20s'
 assert_log_contains gatt_error "$gatt_error_log" '-m wake_failed'
 assert_log_contains gatt_error "$gatt_error_log" 'wake failed without re-blocking Bluetooth; normal reconnect monitor remains available'
@@ -166,6 +184,14 @@ assert_wake_processed monitor_handover "$monitor_handover_log"
 assert_log_contains monitor_handover "$monitor_handover_log" 'normal reconnect monitor released after BLE wake'
 assert_log_contains monitor_handover "$monitor_handover_log" 'wake_success: A2DP sink and DLNA renderer are ready'
 assert_log_excludes monitor_handover "$monitor_handover_log" 'Classic audio connection attempt'
+
+run_case command_property no 1 no 1 no 0x04
+assert_log_contains command_property "$tmp/command_property.log" '--char-write --handle 0x0003 --value=8c68abe03ff601'
+assert_log_contains command_property "$tmp/command_property.log" 'BLE wake GATT write command confirmed by ATT response'
+
+run_case missing_confirmation no 1 no 1 no 0x08 no yes
+assert_log_contains missing_confirmation "$tmp/missing_confirmation.log" 'BLE wake GATT write request was not confirmed (gatttool exit 0)'
+assert_log_excludes missing_confirmation "$tmp/missing_confirmation.log" 'BLE wake GATT write request confirmed by ATT response'
 
 # A stale idle notification may arrive immediately before playback is reported.
 # The later playing state must clear both the debounce and any pending idle

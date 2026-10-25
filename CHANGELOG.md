@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.6.2-test.8
+- Replace the unsupported `bluetoothctl bearer`/fire-and-forget GATT sequence
+  with BlueZ `gatttool` discovery and writes. Select ATT Write Request for the
+  characteristic's `write` property, and Write Command only when that is the
+  advertised supported property.
+- Require the ATT Write Response confirmation before reporting the stack write
+  as confirmed; physical power-on/off still requires independent observation.
+- Include Alpine's `bluez-deprecated` package for its `gatttool` utility. Audio,
+  renderer, idle timeout, and wake timeout behavior are unchanged.
+
 ## 2.6.2-test.7
 - Select the LE bearer explicitly and use the UE BOOM power characteristic's
   reported write-without-response procedure for reverse-engineered `01` wake

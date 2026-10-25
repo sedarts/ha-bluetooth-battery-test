@@ -25,12 +25,11 @@ RUN apk add --no-cache \
         # au serveur audio partagé du Supervisor (celui qui voit le sink
         # Bluetooth de l'enceinte).
         bluez \
+        bluez-deprecated \
         mosquitto-clients \
-        # Fournit "bluetoothctl" (le paquet "bluez-deprecated" ne contient
-        # QUE les anciens outils type hcitool/hciconfig, pas bluetoothctl —
-        # erreur détectée après un premier essai raté) : utilisé par notre
-        # script pour connecter/reconnecter automatiquement l'enceinte si
-        # elle se met en veille.
+        # bluez-deprecated ajoute gatttool (ATT direct, réponse explicite pour
+        # Write Request) ; bluetoothctl reste fourni par bluez et sert à gérer
+        # les connexions Classic/reconnect.
         gettext \
         # Fournit "envsubst" : petit outil pour remplacer des variables
         # (ex: ${BLUETOOTH_SINK}) dans notre fichier mpd.conf.template

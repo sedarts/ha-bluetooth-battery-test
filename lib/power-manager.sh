@@ -54,42 +54,59 @@ request_renderer_handover() {
   fi
 }
 
-# The UE BOOM 2 power characteristic is a write-without-response GATT
-# attribute. Select LE explicitly: Device1.Connect on a dual-mode device can
-# otherwise prefer its bonded Classic bearer. The final byte is 01 (on) or
-# 02 (off); the six address bytes must identify a host already paired to BOOM.
+# The BOOM power characteristic is written with the ATT procedure advertised
+# by its discovered properties. gatttool is used because this BlueZ 5.66 image's
+# bluetoothctl has no `bearer` command and exits before its async WriteValue
+# result can be observed. The final byte is 01 (on) or 02 (off).
 ble_power_command() {
-  local action="$1" command_byte="$2" bytes="" octet output status=0
+  local action="$1" command_byte="$2" hex="" octet discovery status=0 uuid="c6d6dc0d-07f5-47ef-9b59-630622b01fd3"
+  local characteristic handle properties write_flag write_flag_name write_args output
   [ -n "${PM_ADAPTER_MAC}" ] || { log "BLE power command unavailable: paired-host MAC is not configured"; return 1; }
   [ "${action}" = wake ] || [ "${action}" = off ] || return 1
-  for octet in ${PM_ADAPTER_MAC//:/ }; do bytes+="$((16#${octet})) "; done
-  bytes+="$((16#${command_byte}))"
+  for octet in ${PM_ADAPTER_MAC//:/ }; do printf -v octet '%02x' "$((16#${octet}))"; hex+="${octet}"; done
+  printf -v octet '%02x' "$((16#${command_byte}))"; hex+="${octet}"
 
-  # Disconnect first so BlueZ can apply PreferredBearer to the next link.
+  # Release a Classic connection before opening the LE ATT connection.
   bluetoothctl disconnect "${PM_MAC}" >/dev/null 2>&1 || true
-  output=$(printf 'bearer %s le\nconnect %s\nmenu gatt\nselect-attribute c6d6dc0d-07f5-47ef-9b59-630622b01fd3\nattribute-info\nwrite "%s" 0 command\nquit\n' \
-    "${PM_MAC}" "${PM_MAC}" "${bytes}" | timeout 20 bluetoothctl 2>&1) || status=$?
-  if [ "${status}" -ne 0 ] || grep -Eqi 'failed|error|invalid|not permitted|not authorized|unable to find|not connected' <<<"${output}"; then
-    log "BLE ${action} GATT operation failed (bluetoothctl exit ${status}): ${output//$'\n'/; }"
-    bluetoothctl disconnect "${PM_MAC}" >/dev/null 2>&1 || true
-    bluetoothctl bearer "${PM_MAC}" last-seen >/dev/null 2>&1 || true
+  discovery=$(timeout 15 gatttool --adapter hci0 --device "${PM_MAC}" --characteristics --uuid "${uuid}" 2>&1) || status=$?
+  if [ "${status}" -ne 0 ] || grep -Eqi 'failed|error|not connected|not found' <<<"${discovery}"; then
+    log "BLE ${action} GATT discovery failed (gatttool exit ${status}): ${discovery//$'\n'/; }"
     return 1
   fi
-  if ! grep -Eqi 'PreferredBearer: le|Changing le succeeded' <<<"${output}"; then
-    log "BLE ${action} not sent: BlueZ did not confirm LE bearer selection"
-    bluetoothctl disconnect "${PM_MAC}" >/dev/null 2>&1 || true
-    bluetoothctl bearer "${PM_MAC}" last-seen >/dev/null 2>&1 || true
+  characteristic=$(grep -iF "uuid: ${uuid}" <<<"${discovery}" | head -n1)
+  if [ -z "${characteristic}" ]; then
+    log "BLE ${action} GATT characteristic ${uuid} not found: ${discovery//$'\n'/; }"
     return 1
   fi
-  if ! grep -Eqi 'write-without-response' <<<"${output}"; then
-    log "BLE ${action} not sent: selected characteristic did not confirm write-without-response capability"
-    bluetoothctl disconnect "${PM_MAC}" >/dev/null 2>&1 || true
-    bluetoothctl bearer "${PM_MAC}" last-seen >/dev/null 2>&1 || true
+  handle=$(sed -n 's/.*char value handle: *\(0x[0-9a-fA-F]*\).*/\1/p' <<<"${characteristic}")
+  properties=$(sed -n 's/.*char properties: *\(0x[0-9a-fA-F]*\).*/\1/p' <<<"${characteristic}")
+  if [ -z "${handle}" ] || [ -z "${properties}" ]; then
+    log "BLE ${action} GATT discovery returned incomplete characteristic metadata: ${characteristic}"
     return 1
   fi
-  log "BLE ${action} GATT write command submitted; speaker-side effect is not acknowledged by this characteristic"
+  write_flag=$((properties))
+  if (( write_flag & 8 )); then
+    write_args=(--char-write-req)
+    write_flag_name="request"
+  elif (( write_flag & 4 )); then
+    write_args=(--char-write)
+    write_flag_name="command"
+  else
+    log "BLE ${action} not sent: characteristic does not advertise a supported write property (properties ${properties})"
+    return 1
+  fi
+  status=0
+  output=$(timeout 15 gatttool --adapter hci0 --device "${PM_MAC}" "${write_args[@]}" --handle "${handle}" --value="${hex}" 2>&1) || status=$?
+  if [ "${status}" -ne 0 ] || grep -Eqi 'failed|error|protocol error|not permitted|not authorized' <<<"${output}"; then
+    log "BLE ${action} GATT write ${write_flag_name} failed (gatttool exit ${status}): ${output//$'\n'/; }"
+    return 1
+  fi
+  if ! grep -Eqi 'Characteristic value was written suc?cessfully' <<<"${output}"; then
+    log "BLE ${action} GATT write ${write_flag_name} was not confirmed (gatttool exit ${status}): ${output//$'\n'/; }"
+    return 1
+  fi
+  log "BLE ${action} GATT write ${write_flag_name} confirmed by ATT response; physical speaker action remains unconfirmed"
   bluetoothctl disconnect "${PM_MAC}" >/dev/null 2>&1 || true
-  bluetoothctl bearer "${PM_MAC}" last-seen >/dev/null 2>&1 || true
   return 0
 }
 wait_for_renderer_ready() {

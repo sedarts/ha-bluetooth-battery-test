@@ -20,6 +20,7 @@
 
 # --- Constantes ---
 BTUI_STATE_DIR="/tmp/btui"
+. /opt/btui/lib/bluetooth-ops.sh
 # État volatil de la page : opération en cours, dernier résultat de scan,
 # journal de la dernière session bluetoothctl. Volontairement dans /tmp et
 # pas dans /data : rien de tout ça n'a besoin de survivre à un redémarrage
@@ -248,6 +249,7 @@ devices_update() {
 # confirmation" (oui/non, sans code à saisir) l'est.
 bt_scan_session() {
     local seconds="$1" mac="${2:-}"
+    bt_ops_acquire "webui-scan-${mac:-classic}" 10 || return 1
     local fifo="${BTUI_STATE_DIR}/bluetoothctl.in"
     mkdir -p "${BTUI_STATE_DIR}"
     : >"${BTUI_SESSION_LOG}"
@@ -260,7 +262,7 @@ bt_scan_session() {
     # descripteur ouvert pendant toute la session évite que bluetoothctl
     # ne voie une fin de fichier prématurée entre deux commandes.
     exec {BTUI_FIFO_FD}<>"${fifo}"
-    bluetoothctl <&"${BTUI_FIFO_FD}" >"${BTUI_SESSION_LOG}" 2>&1 &
+    timeout 70 bluetoothctl <&"${BTUI_FIFO_FD}" >"${BTUI_SESSION_LOG}" 2>&1 &
     local bt_pid=$!
 
     {
@@ -307,6 +309,7 @@ bt_scan_session() {
     exec {BTUI_FIFO_FD}>&-
     wait "${bt_pid}" 2>/dev/null || true
     rm -f "${fifo}"
+    bt_ops_release
 }
 
 # ============================================================
@@ -415,8 +418,14 @@ job_pair() {
     # "trust" est ce qui autorise la reconnexion automatique de run.sh
     # (voir README, dépannage) : c'est l'étape la plus souvent oubliée lors
     # d'un appairage manuel, d'où son automatisation ici.
-    bluetoothctl trust "${mac}" >/dev/null 2>&1 || true
-    bluetoothctl connect "${mac}" >/dev/null 2>&1 || true
+    if bt_ops_acquire "webui-pair-connect-${mac}" 10; then
+        timeout 8 bluetoothctl trust "${mac}" >/dev/null 2>&1 || true
+        timeout 8 bluetoothctl connect "${mac}" >/dev/null 2>&1 || true
+        bt_ops_release
+    else
+        job_set error "Pairing completed, but the shared Bluetooth operation lock was unavailable."
+        return
+    fi
     devices_update "${mac}"
     info=$(bt_info "${mac}")
     if [ "$(info_flag "${info}" Trusted)" != true ]; then

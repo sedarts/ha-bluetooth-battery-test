@@ -45,6 +45,16 @@ cat >"$tmp/bin/timeout" <<'EOF'
 #!/usr/bin/env bash
 shift; exec "$@"
 EOF
+cat >"$tmp/bin/flock" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = -u ]; then rmdir "${BT_OPS_LOCK_FILE}.held" 2>/dev/null || true; exit 0; fi
+if [ "${1:-}" = -w ]; then shift 2; else shift; fi
+limit=${1:-0}; start=$SECONDS
+while ! mkdir "${BT_OPS_LOCK_FILE}.held" 2>/dev/null; do
+  [ "$((SECONDS - start))" -ge "$limit" ] && exit 1
+  sleep 0.05
+done
+EOF
 cat >"$tmp/bin/sleep" <<'EOF'
 #!/usr/bin/env bash
 if [ "${PM_TEST_RENDERER_ACK:-no}" = yes ] && [ -f "${PM_TEST_RENDERER_REQUEST:-}" ]; then
@@ -61,7 +71,7 @@ cat >"$tmp/bin/mosquitto_sub" <<'EOF'
 count=0; [ -f "$PM_TEST_SUB_COUNT" ] && count=$(cat "$PM_TEST_SUB_COUNT")
 count=$((count + 1)); printf '%s' "$count" >"$PM_TEST_SUB_COUNT"
 case "${PM_TEST_SCENARIO}:${count}" in
-  success:1|ble_only:1|gatt_error:1|monitor_handover:1|command_property:1|missing_confirmation:1) printf '%s wake\n' "$PM_TEST_COMMAND_TOPIC" ;;
+  success:1|ble_only:1|gatt_error:1|monitor_handover:1|command_property:1|missing_confirmation:1|error_then_new_wake:1|error_then_new_wake:2|resource_busy:1|resource_busy_exhausted:1) printf '%s wake\n' "$PM_TEST_COMMAND_TOPIC" ;;
   success:2|success:3) printf '%s idle\n' "$PM_TEST_PLAYBACK_TOPIC" ;;
   playing_cancels_idle:1) printf '%s idle\n' "$PM_TEST_PLAYBACK_TOPIC" ;;
   playing_cancels_idle:2) printf '%s playing\n' "$PM_TEST_PLAYBACK_TOPIC" ;;
@@ -103,6 +113,11 @@ cat >"$tmp/bin/gatttool" <<'EOF'
 #!/usr/bin/env bash
 printf 'gatttool %s\n' "$*" >>"$PM_TEST_LOG"
 if [[ " $* " == *' --characteristics '* ]]; then
+  if [ "${PM_TEST_SCENARIO:-}" = resource_busy ] || [ "${PM_TEST_SCENARIO:-}" = resource_busy_exhausted ]; then
+    count=0; [ -f "$PM_TEST_GATT_COUNT" ] && count=$(cat "$PM_TEST_GATT_COUNT")
+    count=$((count + 1)); printf '%s' "$count" >"$PM_TEST_GATT_COUNT"
+    if [ "$count" -lt 3 ] || [ "${PM_TEST_SCENARIO:-}" = resource_busy_exhausted ]; then echo 'connect: Resource busy (16)'; exit 1; fi
+  fi
   [ "${PM_TEST_GATT_DISCOVERY_FAIL:-no}" = yes ] && { echo 'Connection failed'; exit 0; }
   printf 'handle: 0x0002, char properties: %s, char value handle: 0x0003, uuid: c6d6dc0d-07f5-47ef-9b59-630622b01fd3\n' "${PM_TEST_GATT_PROPERTIES:-0x08}"
   exit 0
@@ -123,9 +138,11 @@ run_case() {
   PM_TEST_LOG="$log" PM_TEST_SCENARIO="$scenario" PM_TEST_A2DP="$a2dp" PM_TEST_BLE_ERROR="$ble_error" \
   PM_TEST_GATT_PROPERTIES="$gatt_properties" PM_TEST_GATT_WRITE_FAIL="$gatt_write_fail" \
   PM_TEST_GATT_WRITE_NO_ACK="$gatt_write_no_ack" \
+  PM_TEST_GATT_COUNT="$tmp/${scenario}.gatt" \
   PM_TEST_A2DP_AFTER="$a2dp_after" PM_TEST_RENDERER_ACK="$renderer_ack" PM_TEST_RENDERER_REQUEST="$renderer_dir/C0:28:8D:82:F7:BB" \
   PM_TEST_SUB_COUNT="$tmp/${scenario}.sub" PM_TEST_INFO_COUNT="$tmp/${scenario}.info" PM_TEST_PACTL_COUNT="$tmp/${scenario}.pactl" PM_TEST_CLOCK="$tmp/${scenario}.clock" \
   PM_PAUSE_DIR="$tmp/${scenario}.paused" \
+  PM_BT_OPS_LIB="$root/lib/bluetooth-ops.sh" BT_OPS_LOCK_FILE="$tmp/${scenario}.bt.lock" \
   PM_TEST_COMMAND_TOPIC='bluetooth_audio_bridge/c0288d82f7bb/power/command' \
   PM_TEST_PLAYBACK_TOPIC='bluetooth_audio_bridge/c0288d82f7bb/power/playback' PATH="$tmp/bin:$PATH" \
   PM_TEST_MAX_LOOPS="$loops" PM_MAC=C0:28:8D:82:F7:BB PM_NAME='UE BOOM 2' PM_ENABLED=true \
@@ -151,10 +168,10 @@ assert_log_contains success "$success_log" 'idle timer already running; repeated
 # monitor only for BLE/boot, then release it before waiting for A2DP. The
 # later marker/block pair belongs solely to the independently tested idle path.
 unblock_line=$(grep -n '^unblock C0:28:8D:82:F7:BB' "$success_log" | head -n1 | cut -d: -f1)
-wake_pause_line=$(grep -n 'reconnect monitor paused while wake waits for A2DP' "$success_log" | head -n1 | cut -d: -f1)
+wake_pause_line=$(grep -n 'reconnect pause set before waiting for shared Bluetooth lock' "$success_log" | head -n1 | cut -d: -f1)
 wake_release_line=$(grep -n 'normal reconnect monitor released after BLE wake' "$success_log" | head -n1 | cut -d: -f1)
 waiting_classic_line=$(grep -n -- '-m waiting_for_classic' "$success_log" | head -n1 | cut -d: -f1)
-[ "$unblock_line" -lt "$wake_pause_line" ] && [ "$wake_pause_line" -lt "$wake_release_line" ] && [ "$wake_release_line" -lt "$waiting_classic_line" ]
+[ "$wake_pause_line" -lt "$unblock_line" ] && [ "$unblock_line" -lt "$wake_release_line" ] && [ "$wake_release_line" -lt "$waiting_classic_line" ]
 marker_line=$(grep -n 'reconnect pause marker set before idle disconnect' "$success_log" | head -n1 | cut -d: -f1)
 disconnect_line=$(grep -n 'disconnect C0:28:8D:82:F7:BB' "$success_log" | tail -n1 | cut -d: -f1)
 block_line=$(grep -n '^block C0:28:8D:82:F7:BB' "$success_log" | head -n1 | cut -d: -f1)
@@ -164,19 +181,17 @@ run_case ble_only no 1
 ble_only_log="$tmp/ble_only.log"
 assert_wake_processed ble_only "$ble_only_log"
 assert_log_contains ble_only "$ble_only_log" 'BLE wake GATT write request confirmed by ATT response; physical speaker action remains unconfirmed'
-assert_log_contains ble_only "$ble_only_log" 'wake timed out: no A2DP sink became available within 20s'
+assert_log_contains ble_only "$ble_only_log" 'state=ERROR wake failed; reconnect remains suppressed until a new explicit wake'
 assert_log_excludes ble_only "$ble_only_log" 'wake_success: A2DP sink and DLNA renderer are ready'
-assert_log_contains ble_only "$ble_only_log" '-m wake_failed'
-assert_log_contains ble_only "$ble_only_log" 'wake failed without re-blocking Bluetooth; normal reconnect monitor remains available'
-[ ! -e "$tmp/ble_only.paused/C0:28:8D:82:F7:BB" ]
+assert_log_contains ble_only "$ble_only_log" '-m error'
+[ -e "$tmp/ble_only.paused/C0:28:8D:82:F7:BB" ]
 
 run_case gatt_error no 1 yes
 gatt_error_log="$tmp/gatt_error.log"
 assert_wake_processed gatt_error "$gatt_error_log"
 assert_log_contains gatt_error "$gatt_error_log" 'BLE wake GATT write request failed (gatttool exit 0)'
-assert_log_contains gatt_error "$gatt_error_log" 'wake timed out: no A2DP sink became available within 20s'
-assert_log_contains gatt_error "$gatt_error_log" '-m wake_failed'
-assert_log_contains gatt_error "$gatt_error_log" 'wake failed without re-blocking Bluetooth; normal reconnect monitor remains available'
+assert_log_contains gatt_error "$gatt_error_log" '-m error'
+assert_log_contains gatt_error "$gatt_error_log" 'state=ERROR wake failed; reconnect remains suppressed until a new explicit wake'
 
 run_case monitor_handover yes 1 no 4 yes
 monitor_handover_log="$tmp/monitor_handover.log"
@@ -187,11 +202,27 @@ assert_log_excludes monitor_handover "$monitor_handover_log" 'Classic audio conn
 
 run_case command_property no 1 no 1 no 0x04
 assert_log_contains command_property "$tmp/command_property.log" '--char-write --handle 0x0003 --value=8c68abe03ff601'
-assert_log_contains command_property "$tmp/command_property.log" 'BLE wake GATT write command confirmed by ATT response'
+assert_log_contains command_property "$tmp/command_property.log" 'BLE wake GATT write command submitted; ATT confirmation is not defined'
 
 run_case missing_confirmation no 1 no 1 no 0x08 no yes
 assert_log_contains missing_confirmation "$tmp/missing_confirmation.log" 'BLE wake GATT write request was not confirmed (gatttool exit 0)'
 assert_log_excludes missing_confirmation "$tmp/missing_confirmation.log" 'BLE wake GATT write request confirmed by ATT response'
+
+run_case resource_busy yes 1 no 1 yes
+assert_log_contains resource_busy "$tmp/resource_busy.log" 'BLE wake resource busy; bounded retry 1/3 after 1s'
+assert_log_contains resource_busy "$tmp/resource_busy.log" 'BLE wake resource busy; bounded retry 2/3 after 1s'
+[ "$(cat "$tmp/resource_busy.gatt")" -eq 3 ]
+run_case resource_busy_exhausted no 1
+assert_log_contains resource_busy_exhausted "$tmp/resource_busy_exhausted.log" 'BLE wake series ended attempts=3/3 result=failed'
+assert_log_contains resource_busy_exhausted "$tmp/resource_busy_exhausted.log" 'state=ERROR wake failed; reconnect remains suppressed until a new explicit wake'
+[ "$(cat "$tmp/resource_busy_exhausted.gatt")" -eq 3 ]
+
+# ERROR must not terminate the MQTT consumer: a later explicit wake starts a
+# fresh session and can succeed when the speaker is already A2DP-ready.
+run_case error_then_new_wake yes 3 no 1 yes 0x08 yes
+assert_log_contains error_then_new_wake "$tmp/error_then_new_wake.log" 'state=ERROR wake failed; reconnect remains suppressed until a new explicit wake'
+[ "$(grep -c 'wake command received' "$tmp/error_then_new_wake.log")" -eq 2 ]
+assert_log_contains error_then_new_wake "$tmp/error_then_new_wake.log" 'wake_success: A2DP sink and DLNA renderer are ready'
 
 # A stale idle notification may arrive immediately before playback is reported.
 # The later playing state must clear both the debounce and any pending idle

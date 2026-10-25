@@ -26,6 +26,7 @@ RUN apk add --no-cache \
         # Bluetooth de l'enceinte).
         bluez \
         bluez-deprecated \
+        flock \
         mosquitto-clients \
         # bluez-deprecated ajoute gatttool (ATT direct, réponse explicite pour
         # Write Request) ; bluetoothctl reste fourni par bluez et sert à gérer
@@ -88,6 +89,8 @@ RUN apk add --no-cache --virtual .gmrender-build-deps \
 COPY run.sh /run.sh
 COPY lib/power-manager.sh /opt/btui/lib/power-manager.sh
 COPY lib/renderer-recovery.sh /opt/btui/lib/renderer-recovery.sh
+COPY lib/bluetooth-ops.sh /opt/btui/lib/bluetooth-ops.sh
+COPY lib/wake-retries.sh /opt/btui/lib/wake-retries.sh
 COPY mpd.conf.template /etc/mpd.conf.template
 # On copie un "modèle" (template) de config MPD, pas la config finale :
 # le nom exact du sink Bluetooth dépend de l'adresse MAC configurée par
@@ -100,7 +103,7 @@ COPY webui/ /opt/btui/
 # elle-même (www/, avec la page et les scripts CGI). Voir run.sh, étape
 # 1ter.
 
-RUN chmod a+x /run.sh /opt/btui/lib/power-manager.sh /opt/btui/lib/renderer-recovery.sh /opt/btui/www/cgi-bin/*.cgi
+RUN chmod a+x /run.sh /opt/btui/lib/power-manager.sh /opt/btui/lib/renderer-recovery.sh /opt/btui/lib/bluetooth-ops.sh /opt/btui/lib/wake-retries.sh /opt/btui/www/cgi-bin/*.cgi
 # Rend les scripts exécutables (obligatoire, sinon le conteneur refusera
 # de lancer run.sh, et httpd refusera d'exécuter les scripts CGI de la
 # page d'appairage).

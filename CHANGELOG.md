@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.6.2-test.9 (local, not released)
+- Serialize bridge-owned Classic connect/disconnect, BLE GATT, pairing, and scan
+  operations through a bounded adapter lock. A wake pause is published before
+  waiting for an in-flight Classic operation; the pause is rechecked after lock.
+- With BLE wake enabled, do not auto-connect an off/unknown speaker on add-on
+  startup or periodically outside an explicit wake. Existing A2DP remains
+  observable and the existing renderer recovery path is retained.
+- Bound BLE wake to three attempts and explicit wake Classic/A2DP recovery to
+  four attempts within the same 90-second deadline. `Connected: yes` without
+  the A2DP sink is not readiness; exhausted wake enters `error` and suppresses
+  automatic reconnect until another explicit wake. MQTT controller stays up.
+- Report Write Request confirmation separately from Write Command submission;
+  Write Commands have no ATT response to confirm. Keep the physical power state
+  unknown without independent observation. Idle timeout remains 300 seconds.
+- Add timestamped operation/lock logs, coordination and Resource-busy
+  regression coverage, and Git-tracked BLE protocol/state/test-history docs.
+- No renderer, SSDP, Music Assistant, BLE payload, or add-on identity changes.
+
 ## 2.6.2-test.8
 - Replace the unsupported `bluetoothctl bearer`/fire-and-forget GATT sequence
   with BlueZ `gatttool` discovery and writes. Select ATT Write Request for the

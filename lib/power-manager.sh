@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # MQTT controlled, opt-in power manager for one primary speaker.
-# It deliberately never sends a BLE power-off command: idle means A2DP
-# disconnect only, allowing speakers with their own sleep timer to power down.
+# Power state remains unknown unless independently observed; idle performs the
+# configured BLE-off attempt (when enabled) and then cleans up Classic audio.
 set -u -o pipefail
+. "${PM_BT_OPS_LIB:-/opt/btui/lib/bluetooth-ops.sh}"
 
 : "${PM_MAC:?}" "${PM_NAME:?}" "${PM_ENABLED:=false}" "${PM_IDLE_TIMEOUT:=300}" "${PM_STOP_DEBOUNCE:=10}"
 : "${PM_BLE_WAKE:=false}" "${PM_ADAPTER_MAC:=}" "${PM_MQTT_HOST:=}"
@@ -29,12 +30,13 @@ idle_deadline=0
 stop_debounce_deadline=0
 stop_candidate=""
 mode="disabled"
+PM_CURRENT_WAKE_DEADLINE=0
 
 mqtt_args=(-h "${PM_MQTT_HOST}" -p "${PM_MQTT_PORT}")
 [ -n "${PM_MQTT_USER}" ] && mqtt_args+=(-u "${PM_MQTT_USER}")
 [ -n "${PM_MQTT_PASS}" ] && mqtt_args+=(-P "${PM_MQTT_PASS}")
 
-log() { echo "[power-manager] $*"; }
+log() { printf '[%s][power-manager][op=%s] %s\n' "$(bt_ops_timestamp)" "${PM_CURRENT_OPERATION_ID:-${BT_OP_ID:-none}}" "$*"; }
 publish() { timeout 8 mosquitto_pub "${mqtt_args[@]}" -t "${state_topic}" -m "$1" -r >/dev/null 2>&1 || log "MQTT status publish failed"; }
 publish_management() { timeout 8 mosquitto_pub "${mqtt_args[@]}" -t "${management_topic}" -m "$1" -r >/dev/null 2>&1 || log "MQTT management-state publish failed"; }
 connected() { bluetoothctl info "${PM_MAC}" 2>/dev/null | grep -q '^[[:space:]]*Connected: yes'; }
@@ -46,7 +48,8 @@ a2dp_ready() {
 request_renderer_handover() {
   local renderer_request="$1" renderer_ready="${1}.renderer_ready"
   rm -f "${renderer_ready}"
-  if mkdir -p "${PM_RENDERER_DIR}" && printf 'requested\n' > "${renderer_request}"; then
+  rm -f "${renderer_request}.error"
+  if mkdir -p "${PM_RENDERER_DIR}" && printf '%s %s\n' "${PM_CURRENT_OPERATION_ID:-wake-$(date +%s)-$$}" "${PM_CURRENT_WAKE_DEADLINE}" > "${renderer_request}"; then
     log "renderer handover requested; normal reconnect monitor owns Classic/A2DP connection"
   else
     log "could not request renderer handover"
@@ -58,7 +61,7 @@ request_renderer_handover() {
 # by its discovered properties. gatttool is used because this BlueZ 5.66 image's
 # bluetoothctl has no `bearer` command and exits before its async WriteValue
 # result can be observed. The final byte is 01 (on) or 02 (off).
-ble_power_command() {
+ble_power_command_once() {
   local action="$1" command_byte="$2" hex="" octet discovery status=0 uuid="c6d6dc0d-07f5-47ef-9b59-630622b01fd3"
   local characteristic handle properties write_flag write_flag_name write_args output
   [ -n "${PM_ADAPTER_MAC}" ] || { log "BLE power command unavailable: paired-host MAC is not configured"; return 1; }
@@ -68,7 +71,7 @@ ble_power_command() {
 
   # Release a Classic connection before opening the LE ATT connection.
   bluetoothctl disconnect "${PM_MAC}" >/dev/null 2>&1 || true
-  discovery=$(timeout 15 gatttool --adapter hci0 --device "${PM_MAC}" --characteristics --uuid "${uuid}" 2>&1) || status=$?
+  discovery=$(timeout 5 gatttool --adapter hci0 --device "${PM_MAC}" --characteristics --uuid "${uuid}" 2>&1) || status=$?
   if [ "${status}" -ne 0 ] || grep -Eqi 'failed|error|not connected|not found' <<<"${discovery}"; then
     log "BLE ${action} GATT discovery failed (gatttool exit ${status}): ${discovery//$'\n'/; }"
     return 1
@@ -96,22 +99,50 @@ ble_power_command() {
     return 1
   fi
   status=0
-  output=$(timeout 15 gatttool --adapter hci0 --device "${PM_MAC}" "${write_args[@]}" --handle "${handle}" --value="${hex}" 2>&1) || status=$?
+  output=$(timeout 5 gatttool --adapter hci0 --device "${PM_MAC}" "${write_args[@]}" --handle "${handle}" --value="${hex}" 2>&1) || status=$?
   if [ "${status}" -ne 0 ] || grep -Eqi 'failed|error|protocol error|not permitted|not authorized' <<<"${output}"; then
     log "BLE ${action} GATT write ${write_flag_name} failed (gatttool exit ${status}): ${output//$'\n'/; }"
     return 1
   fi
-  if ! grep -Eqi 'Characteristic value was written suc?cessfully' <<<"${output}"; then
-    log "BLE ${action} GATT write ${write_flag_name} was not confirmed (gatttool exit ${status}): ${output//$'\n'/; }"
-    return 1
+  if [ "${write_flag_name}" = request ]; then
+    if ! grep -Eqi 'Characteristic value was written suc?cessfully' <<<"${output}"; then
+      log "BLE ${action} GATT write request was not confirmed (gatttool exit ${status}): ${output//$'\n'/; }"
+      return 1
+    fi
+    log "BLE ${action} GATT write request confirmed by ATT response; physical speaker action remains unconfirmed"
+  else
+    log "BLE ${action} GATT write command submitted; ATT confirmation is not defined for Write Command, physical speaker action remains unconfirmed"
   fi
-  log "BLE ${action} GATT write ${write_flag_name} confirmed by ATT response; physical speaker action remains unconfirmed"
   bluetoothctl disconnect "${PM_MAC}" >/dev/null 2>&1 || true
   return 0
 }
+
+ble_power_command_locked() {
+  local action="$1" command_byte="$2" attempt rc=1 output state_label=POWERING_OFF
+  [ "${action}" = wake ] && state_label=WAKING
+  for attempt in 1 2 3; do
+    log "state=${state_label} operation=ble-${action} attempt=${attempt}/3 start"
+    output=$(ble_power_command_once "${action}" "${command_byte}" 2>&1) && rc=0 || rc=$?
+    printf '%s\n' "${output}"
+    [ "${rc}" -eq 0 ] && break
+    if grep -Eqi 'Resource busy \(16\)|resource busy' <<<"${output}" && [ "${attempt}" -lt 3 ]; then
+      log "BLE ${action} resource busy; bounded retry ${attempt}/3 after 1s"
+      sleep 1
+    else
+      break
+    fi
+  done
+  log "BLE ${action} series ended attempts=${attempt}/3 result=$([ "${rc}" -eq 0 ] && echo submitted || echo failed)"
+  return "${rc}"
+}
+
 wait_for_renderer_ready() {
   local renderer_request="$1" renderer_ready="${1}.renderer_ready" deadline="$2"
   while [ "$(date +%s)" -lt "${deadline}" ]; do
+    if [ -f "${renderer_request}.error" ]; then
+      log "wake failed: reconnect monitor exhausted its bounded Classic/A2DP series"
+      return 1
+    fi
     if [ -f "${renderer_ready}" ]; then
       rm -f "${renderer_request}" "${renderer_ready}"
       mode="ready"; publish "${mode}"
@@ -126,9 +157,13 @@ wait_for_renderer_ready() {
 }
 fail_wake() {
   local renderer_request="$1"
+  mkdir -p "$(dirname "${renderer_request}")"
   rm -f "${renderer_request}" "${renderer_request}.renderer_ready"
-  log "wake failed without re-blocking Bluetooth; normal reconnect monitor remains available"
-  mode="wake_failed"; publish "${mode}"
+  mkdir -p "${PM_PAUSE_DIR}"
+  printf '0\n' > "${PM_PAUSE_DIR}/${PM_MAC^^}"
+  : > "${renderer_request}.error"
+  log "state=ERROR wake failed; reconnect remains suppressed until a new explicit wake"
+  mode="error"; publish "${mode}"
 }
 
 publish_discovery() {
@@ -158,8 +193,10 @@ clear_discovery() {
   done
 }
 
-wake() {
-  local pause_marker renderer_request deadline
+wake_impl() {
+  local pause_marker renderer_request deadline remaining boot_delay classic_reserve=47
+  deadline=$(( $(date +%s) + PM_WAKE_TIMEOUT ))
+  PM_CURRENT_WAKE_DEADLINE="${deadline}"
   pause_marker="${PM_PAUSE_DIR}/${PM_MAC^^}"
   renderer_request="${PM_RENDERER_DIR}/${PM_MAC^^}"
   log "wake command received"
@@ -169,52 +206,56 @@ wake() {
   idle_deadline=0
   stop_debounce_deadline=0
   stop_candidate=""
-  # run.sh recognises this existing pause marker and will therefore not race
-  # our deliberate disconnect with its legacy reconnect loop.
-  if [ -e "${pause_marker}" ]; then
-    if rm -f "${pause_marker}"; then
-      log "reconnect pause marker cleared"
-    else
-      log "failed to clear reconnect pause marker"
-    fi
+  # Publish the pause before waiting on the shared operation lock. An already
+  # running Classic command finishes first; no queued monitor call can pass
+  # the post-lock pause check and race the BLE session.
+  if mkdir -p "${PM_PAUSE_DIR}" && printf '%s\n' "$(( $(date +%s) + PM_WAKE_TIMEOUT + 15 ))" > "${pause_marker}"; then
+    log "state=WAKING reconnect pause set before waiting for shared Bluetooth lock"
   else
-    log "reconnect pause marker was not present"
+    log "failed to pause reconnect monitor during wake"
   fi
-  if timeout 10 bluetoothctl unblock "${PM_MAC}" >/dev/null 2>&1; then
+  if ! bt_ops_acquire "wake-${PM_MAC}" 18; then
+    fail_wake "${renderer_request}"; return
+  fi
+  if timeout 8 bluetoothctl unblock "${PM_MAC}" >/dev/null 2>&1; then
     log "Bluetooth reconnect block cleared"
   else
     log "Bluetooth unblock request failed or device was already unblocked"
   fi
-  # Keep the monitor from issuing a second connection only while the BLE
-  # GATT write and the short BOOM boot delay are in progress. It is released
-  # before Classic/A2DP so it remains the sole connection owner.
-  if mkdir -p "${PM_PAUSE_DIR}" && printf '%s\n' "$(( $(date +%s) + PM_WAKE_TIMEOUT + 15 ))" > "${pause_marker}"; then
-    log "reconnect monitor paused while wake waits for A2DP"
-  else
-    log "failed to pause reconnect monitor during wake"
-  fi
   if connected && a2dp_ready; then
+    bt_ops_release
     log "A2DP is already available; requesting renderer readiness"
     request_renderer_handover "${renderer_request}" || { fail_wake "${renderer_request}"; return; }
     rm -f "${pause_marker}" || log "failed to clear reconnect pause marker after A2DP wake"
-    deadline=$(( $(date +%s) + PM_WAKE_TIMEOUT ))
     mode="renderer_starting"; publish "${mode}"
     wait_for_renderer_ready "${renderer_request}" "${deadline}" || fail_wake "${renderer_request}"
     return
   fi
   if [ "${PM_BLE_WAKE}" = true ] && [ -n "${PM_ADAPTER_MAC}" ]; then
     mode="ble_waking"; publish "${mode}"
-    if ble_power_command wake 01; then
+    if ble_power_command_locked wake 01; then
       log "BLE wake command submitted; waiting for the speaker to switch to Classic audio"
     else
-      log "BLE wake command could not be verified as submitted"
+      bt_ops_release
+      fail_wake "${renderer_request}"
+      return
     fi
+    bt_ops_release
     # The speaker needs time to boot its Classic radio after accepting the
     # GATT frame. The normal reconnect monitor subsequently asks BlueZ for
     # the missing bearer using its established connect_speaker() routine.
-    log "waiting ${PM_WAKE_BOOT_DELAY}s for the speaker to boot Classic audio"
-    sleep "${PM_WAKE_BOOT_DELAY}"
+    remaining=$(( deadline - $(date +%s) ))
+    boot_delay="${PM_WAKE_BOOT_DELAY}"
+    # Reserve enough of the original 90s window for four short bounded
+    # Classic/A2DP attempts. Never extend the deadline for the boot delay.
+    if (( remaining - classic_reserve < boot_delay )); then
+      boot_delay=$(( remaining - classic_reserve ))
+      (( boot_delay < 0 )) && boot_delay=0
+    fi
+    log "waiting ${boot_delay}s (configured ${PM_WAKE_BOOT_DELAY}s, deadline-bounded) for Classic audio boot"
+    sleep "${boot_delay}"
   else
+    bt_ops_release
     log "BLE wake skipped (ble_wake_enabled=${PM_BLE_WAKE}, adapter MAC configured=$([ -n "${PM_ADAPTER_MAC}" ] && echo yes || echo no))"
   fi
   request_renderer_handover "${renderer_request}" || { fail_wake "${renderer_request}"; return; }
@@ -226,7 +267,6 @@ wake() {
     log "failed to release normal reconnect monitor after BLE wake"
   fi
   mode="waiting_for_classic"; publish "${mode}"
-  deadline=$(( $(date +%s) + PM_WAKE_TIMEOUT ))
   while [ "$(date +%s)" -lt "${deadline}" ]; do
     if connected; then
       if a2dp_ready; then
@@ -241,8 +281,14 @@ wake() {
     fi
     sleep 1
   done
-  log "wake timed out: no A2DP sink became available within ${PM_WAKE_TIMEOUT}s"
+    log "wake timed out: no A2DP sink became available within ${PM_WAKE_TIMEOUT}s"
   fail_wake "${renderer_request}"
+}
+
+wake() {
+  PM_CURRENT_OPERATION_ID="wake-$$-$(date +%s)"
+  wake_impl "$@"
+  PM_CURRENT_OPERATION_ID=""
 }
 
 enter_idle() {
@@ -322,36 +368,44 @@ while true; do
   fi
   if [ "${idle_deadline}" -gt 0 ] && [ "$(date +%s)" -ge "${idle_deadline}" ]; then
     idle_deadline=0
+    PM_CURRENT_OPERATION_ID="idle-$$-$(date +%s)"
     mkdir -p "${PM_PAUSE_DIR}"
     printf '0\n' > "${PM_PAUSE_DIR}/${PM_MAC^^}"
     log "reconnect pause marker set before idle disconnect"
-    if [ "${PM_BLE_WAKE}" = true ] && [ -n "${PM_ADAPTER_MAC}" ]; then
-      if ble_power_command off 02; then
-        mode="power_state_unknown"; publish "${mode}"
-        log "BLE power-off command submitted after idle; physical power state remains unknown until independently observed"
+    if bt_ops_acquire "idle-poweroff-${PM_MAC}" 20; then
+      if [ "${PM_BLE_WAKE}" = true ] && [ -n "${PM_ADAPTER_MAC}" ]; then
+        mode="powering_off"; publish "${mode}"
+        if ble_power_command_locked off 02; then
+          mode="power_state_unknown"; publish "${mode}"
+          log "BLE power-off command submitted after idle; physical power state remains unknown until independently observed"
+        else
+          mode="power_state_unknown"; publish "${mode}"
+          log "BLE power-off could not be submitted; physical power state remains unknown"
+        fi
       else
         mode="power_state_unknown"; publish "${mode}"
-        log "BLE power-off could not be submitted; physical power state remains unknown"
+        log "idle disconnect only; BLE power-off disabled or paired-host MAC missing; physical power state unknown"
       fi
+      if bt_ops_disconnect_locked "${PM_MAC}" >/dev/null 2>&1; then
+        log "A2DP disconnected after idle timeout"
+      else
+        log "A2DP disconnect request failed or speaker was already disconnected"
+      fi
+      # Blocking remains paired; wake() reverses the block before reconnect.
+      if bt_ops_block_locked "${PM_MAC}" >/dev/null 2>&1; then
+        log "reconnect blocked after idle timeout"
+      else
+        log "failed to block reconnect after idle timeout"
+      fi
+      bt_ops_release
     else
       mode="power_state_unknown"; publish "${mode}"
-      log "idle disconnect only; BLE power-off disabled or paired-host MAC missing; physical power state unknown"
-    fi
-    if bluetoothctl disconnect "${PM_MAC}" >/dev/null 2>&1; then
-      log "A2DP disconnected after idle timeout"
-    else
-      log "A2DP disconnect request failed or speaker was already disconnected"
-    fi
-    # Block after the explicit disconnect as a second line of defence against
-    # the legacy monitor. Pairing remains intact and wake() reverses this.
-    if bluetoothctl block "${PM_MAC}" >/dev/null 2>&1; then
-      log "reconnect blocked after idle timeout"
-    else
-      log "failed to block reconnect after idle timeout"
+      log "idle Bluetooth operation skipped: shared lock unavailable; physical power state unknown"
     fi
     # Link teardown proves only that the Bluetooth connection was dropped;
     # the BLE power characteristic has no response or status readback.
     mode="power_state_unknown"; publish "${mode}"
+    PM_CURRENT_OPERATION_ID=""
   fi
   loop_count=$((loop_count + 1))
   if [ "${PM_TEST_MAX_LOOPS}" -gt 0 ] && [ "${loop_count}" -ge "${PM_TEST_MAX_LOOPS}" ]; then

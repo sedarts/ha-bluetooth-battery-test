@@ -68,6 +68,7 @@ release_reconnect_lock() {
 
 recover_renderer_after_connect() {
     local mac="$1" name="$2" sink="$3" card="$4" pause_file="$5" lock_dir="$6" attempts="${7:-5}"
+    local connect_timeout="${8:-8}" connect_lock_wait="${9:-10}"
     if [ -e "${pause_file}" ]; then
         bashio::log.info "Reconnect skipped because ${name} is paused." || true
         return 2
@@ -82,7 +83,7 @@ recover_renderer_after_connect() {
         bashio::log.info "Reconnect skipped because ${name} became paused." || true
         return 2
     fi
-    connect_speaker "${mac}" "${name}" || true
+    connect_speaker "${mac}" "${name}" "${connect_timeout}" "${connect_lock_wait}" || true
     if wait_for_a2dp_sink "${mac}" "${sink}" "${card}" "${pause_file}" "${attempts}"; then
         start_renderer
         release_reconnect_lock "${lock_dir}" || true

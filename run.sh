@@ -44,6 +44,7 @@ SPEAKER_NAME=$(bashio::config 'speaker_name')
 # fonctionnement). Par défaut "Bluetooth Speaker" si non renseigné.
 
 RECONNECT_INTERVAL=$(bashio::config 'reconnect_interval')
+BLE_WAKE_ENABLED=$(bashio::config 'ble_wake_enabled' 2>/dev/null || echo false)
 # Intervalle (en secondes) entre deux vérifications de la connexion
 # Bluetooth par la boucle de surveillance (voir étape 5). Par défaut 30s.
 
@@ -221,7 +222,11 @@ fi
 # une seule définition, appelée pour chaque enceinte du tableau
 # SPEAKERS_MAC[]/SPEAKERS_NAME[], au lieu d'une copie par enceinte.
 connect_speaker() {
-    local mac="$1" name="$2"
+    local mac="$1" name="$2" timeout_seconds="${3:-8}" lock_wait="${4:-10}"
+    if ! bt_ops_acquire "classic-connect-${mac}" "${lock_wait}" "/tmp/btui/paused/${mac^^}"; then
+        bashio::log.info "Classic connect skipped for ${name}: paused or Bluetooth operation busy." || true
+        return 1
+    fi
     bashio::log.info "Connecting to ${name} (${mac})..."
     # "|| true" sur les trois lignes ci-dessous : avec "set -e" en tête de
     # script, la moindre commande qui renvoie un code non nul (y compris
@@ -233,12 +238,15 @@ connect_speaker() {
     # du 2026-09-01) : un échec de connexion à l'enceinte ne doit jamais
     # faire tomber le script, seulement être loggé et retenté par la boucle
     # de surveillance (étape 5).
-    bluetoothctl power on || true
-    if bluetoothctl connect "${mac}"; then
+    timeout "${timeout_seconds}" bluetoothctl power on || true
+    if timeout "${timeout_seconds}" bluetoothctl connect "${mac}"; then
         bashio::log.info "${name} connected." || true
     else
         bashio::log.warning "Failed to connect to ${name} — will retry in the monitoring loop." || true
+        bt_ops_release
+        return 1
     fi
+    bt_ops_release
 }
 
 # --- 4bis. Garde-fou : forcer le profil et le volume audio si besoin ---
@@ -310,6 +318,8 @@ ensure_audio_sink() {
 
 # Shared bounded readiness check and single-flight reconnect guard.
 . /opt/btui/lib/renderer-recovery.sh
+. /opt/btui/lib/bluetooth-ops.sh
+. /opt/btui/lib/wake-retries.sh
 
 # Aucune pause ne doit survivre à un redémarrage : /tmp est vide au
 # démarrage du conteneur, mais le blocage Bluetooth posé par la page
@@ -318,7 +328,10 @@ ensure_audio_sink() {
 # pause juste avant un redémarrage resterait refusée sans aucune trace.
 rm -rf /tmp/btui/paused /tmp/btui/wake /tmp/btui/reconnect
 for i in "${!SPEAKERS_MAC[@]}"; do
-    bluetoothctl unblock "${SPEAKERS_MAC[i]}" >/dev/null 2>&1 || true
+    if bt_ops_acquire "startup-unblock-${SPEAKERS_MAC[i]}" 5; then
+        bt_ops_unblock_locked "${SPEAKERS_MAC[i]}" >/dev/null 2>&1 || true
+        bt_ops_release
+    fi
 done
 
 # On tente une première connexion avant même de démarrer MPD, pour que
@@ -332,7 +345,11 @@ for i in "${!SPEAKERS_MAC[@]}"; do
     # retournerait quand même un code non nul pour une raison non couverte
     # ci-dessus — un appel de fonction "nu" comme celui-ci est justement ce
     # qui déclenche "set -e" si son code de sortie est non nul.
-    connect_speaker "${SPEAKERS_MAC[i]}" "${SPEAKERS_NAME[i]}" || true
+    if [ "${BLE_WAKE_ENABLED}" = true ] && [ "${SPEAKERS_MAC[i]^^}" = "${BT_MAC^^}" ]; then
+        bashio::log.info "BLE wake enabled: startup observes existing A2DP but suppresses auto-connect for an off/unknown speaker." || true
+    else
+        connect_speaker "${SPEAKERS_MAC[i]}" "${SPEAKERS_NAME[i]}" || true
+    fi
 done
 for i in "${!SPEAKERS_MAC[@]}"; do
     wait_for_a2dp_sink "${SPEAKERS_MAC[i]}" "$(sink_for_mac "${SPEAKERS_MAC[i]}")" \
@@ -384,7 +401,10 @@ monitor_speaker() {
         [[ "${ends_at}" =~ ^[0-9]+$ ]] || ends_at=0
         if [ "${ends_at}" -gt 0 ] && [ "$(date +%s)" -ge "${ends_at}" ]; then
             rm -f "${file}"
-            bluetoothctl unblock "${mac}" >/dev/null 2>&1 || true
+            if bt_ops_acquire "pause-expiry-unblock-${mac}" 5; then
+                bt_ops_unblock_locked "${mac}" >/dev/null 2>&1 || true
+                bt_ops_release
+            fi
             bashio::log.info "The pause of ${name} is over, reconnecting." || true
             return 1
         fi
@@ -480,8 +500,39 @@ monitor_speaker() {
         else
             bashio::log.warning "${name} has no ready A2DP sink, attempting to reconnect..." || true
             stop_renderer
-            recover_renderer_after_connect "${mac}" "${name}" "${sink}" "${card}" \
-                "/tmp/btui/paused/${mac^^}" "/tmp/btui/reconnect/${mac^^}" 5 || true
+            if [ -f "${wake_request}.error" ]; then
+                bashio::log.info "Wake is in ERROR for ${name}; reconnect suppressed until an explicit new wake." || true
+            elif [ "${BLE_WAKE_ENABLED}" = true ] && [ "${mac^^}" = "${BT_MAC^^}" ] && [ ! -f "${wake_request}" ]; then
+                bashio::log.info "No explicit wake request for ${name}; automatic reconnect suppressed while power state is off/unknown." || true
+            elif [ -f "${wake_request}" ]; then
+                local wake_deadline wake_session_id
+                wake_deadline=$(awk '{print $2}' "${wake_request}" 2>/dev/null || echo 0)
+                wake_session_id=$(awk '{print $1}' "${wake_request}" 2>/dev/null || echo unknown)
+                [[ "${wake_deadline}" =~ ^[0-9]+$ ]] || wake_deadline=0
+                wake_recover_attempt() {
+                    wake_attempt_current="$1"
+                    bt_ops_log "state=CONNECTING operation=${wake_session_id} attempt=$1/$2 Classic/A2DP recovery start device=${mac}"
+                recover_renderer_after_connect "${mac}" "${name}" "${sink}" "${card}" \
+                    "/tmp/btui/paused/${mac^^}" "/tmp/btui/reconnect/${mac^^}" 3 3 3 || true
+                }
+                wake_audio_ready() {
+                    if is_connected; then
+                        bt_ops_log "state=READY operation=${wake_session_id} attempt=${wake_attempt_current}/4 A2DP sink ready device=${mac}"
+                        return 0
+                    fi
+                    return 1
+                }
+                wake_exhausted() {
+                    mkdir -p "/tmp/btui/paused"
+                    printf '0\n' > "/tmp/btui/paused/${mac^^}"
+                    : > "${wake_request}.error"
+                    bt_ops_log "state=ERROR operation=${wake_session_id} Classic/A2DP series ended ($1/$2 attempts within global deadline); reconnect suppressed device=${mac}"
+                }
+                run_classic_wake_retries 4 "${wake_deadline}" wake_recover_attempt wake_audio_ready wake_exhausted || true
+            else
+                recover_renderer_after_connect "${mac}" "${name}" "${sink}" "${card}" \
+                    "/tmp/btui/paused/${mac^^}" "/tmp/btui/reconnect/${mac^^}" 5 || true
+            fi
         fi
         # Vérifié à chaque passage, pas seulement après une reconnexion :
         # le profil PulseAudio peut rester bloqué sur "off" alors que
@@ -570,7 +621,8 @@ fi
 # Optional v2.6.2 controller. Disabled by default, so existing deployments
 # keep their established reconnect behavior until explicitly enabled.
 if [ "$(bashio::config 'power_management_enabled' 2>/dev/null || echo false)" = "true" ] \
-    || [ "$(bashio::config 'battery_mqtt_enabled' 2>/dev/null || echo false)" = "true" ]; then
+    || [ "$(bashio::config 'battery_mqtt_enabled' 2>/dev/null || echo false)" = "true" ] \
+    || [ "${BLE_WAKE_ENABLED}" = "true" ]; then
     PM_ENABLED=$(bashio::config 'power_management_enabled' 2>/dev/null || echo false)
     PM_IDLE_TIMEOUT=$(bashio::config 'idle_timeout' 2>/dev/null || echo 300)
     PM_STOP_DEBOUNCE=$(bashio::config 'stop_debounce' 2>/dev/null || echo 10)

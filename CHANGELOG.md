@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.6.2-test.6
+- Start the DLNA renderer as soon as the existing reconnect monitor observes
+  the wake handover request, rather than waiting for the remainder of its
+  30-second polling interval.
+- Check Classic Bluetooth and the exact A2DP sink immediately after connection,
+  retry sink readiness for up to five checks, and serialize reconnect recovery
+  to prevent duplicate connection and renderer starts.
+- Keep the existing reconnect monitor as fallback when the A2DP sink is not
+  ready. No BLE payload, Music Assistant, SSDP, or idle-timeout behavior changed.
+
 ## 2.6.2-test.5
 - Simplified the BLE wake handover: after the verified GATT write, the power
   manager releases the existing reconnect monitor instead of competing with it

@@ -308,12 +308,15 @@ ensure_audio_sink() {
     # reset périodique intrusif à chaque passage de la boucle.
 }
 
+# Shared bounded readiness check and single-flight reconnect guard.
+. /opt/btui/lib/renderer-recovery.sh
+
 # Aucune pause ne doit survivre à un redémarrage : /tmp est vide au
 # démarrage du conteneur, mais le blocage Bluetooth posé par la page
 # d'appairage (bluetoothctl block) est conservé par BlueZ côté hôte. On le
 # lève donc pour toutes les enceintes configurées, sinon une enceinte mise en
 # pause juste avant un redémarrage resterait refusée sans aucune trace.
-rm -rf /tmp/btui/paused /tmp/btui/wake
+rm -rf /tmp/btui/paused /tmp/btui/wake /tmp/btui/reconnect
 for i in "${!SPEAKERS_MAC[@]}"; do
     bluetoothctl unblock "${SPEAKERS_MAC[i]}" >/dev/null 2>&1 || true
 done
@@ -331,11 +334,9 @@ for i in "${!SPEAKERS_MAC[@]}"; do
     # qui déclenche "set -e" si son code de sortie est non nul.
     connect_speaker "${SPEAKERS_MAC[i]}" "${SPEAKERS_NAME[i]}" || true
 done
-sleep 2
-# Laisse le temps à PulseAudio d'enregistrer la/les carte(s) Bluetooth après
-# la connexion avant de vérifier/forcer leur profil.
 for i in "${!SPEAKERS_MAC[@]}"; do
-    ensure_audio_sink "$(sink_for_mac "${SPEAKERS_MAC[i]}")" "$(card_for_mac "${SPEAKERS_MAC[i]}")"
+    wait_for_a2dp_sink "${SPEAKERS_MAC[i]}" "$(sink_for_mac "${SPEAKERS_MAC[i]}")" \
+        "$(card_for_mac "${SPEAKERS_MAC[i]}")" "/tmp/btui/paused/${SPEAKERS_MAC[i]^^}" 5 || true
 done
 
 # --- 5. Boucle de surveillance Bluetooth (tourne en tâche de fond) ---
@@ -351,7 +352,7 @@ done
 # radio Bluetooth physique lui-même, voir vault : test du 2026-09-06).
 monitor_speaker() {
     local mac="$1" name="$2" sink="$3" card="$4" uuid="$5" port="$6"
-    local info renderer_pid="" wake_request="/tmp/btui/wake/${mac^^}"
+    local info renderer_pid="" wake_request="/tmp/btui/wake/${mac^^}" wake_request_consumed=false
     # renderer_pid est une variable LOCALE à cette fonction : chaque appel de
     # monitor_speaker tourne dans son propre processus (le "&" au moment de
     # l'appel, plus bas), donc le renderer_pid d'une enceinte ne peut pas se
@@ -397,6 +398,11 @@ monitor_speaker() {
         # "disponible" même enceinte éteinte. Démarré ici (donc uniquement
         # quand on sait l'enceinte connectée) plutôt que dans une boucle à
         # part comme avant 2.4.1.
+        if [ -n "${renderer_pid}" ] && kill -0 "${renderer_pid}" 2>/dev/null; then
+            bashio::log.info "DLNA renderer for ${name} is already running; duplicate start skipped." || true
+            acknowledge_wake_renderer
+            return 0
+        fi
         bashio::log.info "Starting the DLNA renderer for ${name} (uuid=${uuid}, port=${port})..." || true
         gmediarender \
             --gstout-audiosink=pulsesink \
@@ -448,7 +454,10 @@ monitor_speaker() {
     fi
 
     while true; do
-        sleep "${RECONNECT_INTERVAL}"
+        # Wake handover is an event already published by the power manager.
+        # Let it interrupt the normal monitor interval so the renderer can
+        # start as soon as the A2DP sink is ready instead of waiting ~30s.
+        wait_for_reconnect_or_wake "${wake_request}" "/tmp/btui/paused/${mac^^}" "${RECONNECT_INTERVAL}"
         # En pause : ni reconnexion, ni renderer (l'entité passe donc
         # "indisponible", comme pour une enceinte éteinte), ni vérification
         # du sink PulseAudio qui n'existe plus tant que l'enceinte est lâchée.
@@ -471,16 +480,8 @@ monitor_speaker() {
         else
             bashio::log.warning "${name} has no ready A2DP sink, attempting to reconnect..." || true
             stop_renderer
-            connect_speaker "${mac}" "${name}" || true
-            sleep 2
-            # Use the existing profile-recovery path immediately after the
-            # normal connect attempt. This avoids waiting for another full
-            # monitor interval when BlueZ is already connected but PulseAudio
-            # has not yet exposed its A2DP sink.
-            ensure_audio_sink "${sink}" "${card}"
-            if is_connected; then
-                start_renderer
-            fi
+            recover_renderer_after_connect "${mac}" "${name}" "${sink}" "${card}" \
+                "/tmp/btui/paused/${mac^^}" "/tmp/btui/reconnect/${mac^^}" 5 || true
         fi
         # Vérifié à chaque passage, pas seulement après une reconnexion :
         # le profil PulseAudio peut rester bloqué sur "off" alors que

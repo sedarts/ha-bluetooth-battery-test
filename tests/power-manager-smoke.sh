@@ -63,6 +63,8 @@ count=$((count + 1)); printf '%s' "$count" >"$PM_TEST_SUB_COUNT"
 case "${PM_TEST_SCENARIO}:${count}" in
   success:1|ble_only:1|gatt_error:1|monitor_handover:1) printf '%s wake\n' "$PM_TEST_COMMAND_TOPIC" ;;
   success:2|success:3) printf '%s idle\n' "$PM_TEST_PLAYBACK_TOPIC" ;;
+  playing_cancels_idle:1) printf '%s idle\n' "$PM_TEST_PLAYBACK_TOPIC" ;;
+  playing_cancels_idle:2) printf '%s playing\n' "$PM_TEST_PLAYBACK_TOPIC" ;;
 esac
 EOF
 cat >"$tmp/bin/pactl" <<'EOF'
@@ -161,5 +163,15 @@ assert_wake_processed monitor_handover "$monitor_handover_log"
 assert_log_contains monitor_handover "$monitor_handover_log" 'normal reconnect monitor released after BLE wake'
 assert_log_contains monitor_handover "$monitor_handover_log" 'wake_success: A2DP sink and DLNA renderer are ready'
 assert_log_excludes monitor_handover "$monitor_handover_log" 'Classic audio connection attempt'
+
+# A stale idle notification may arrive immediately before playback is reported.
+# The later playing state must clear both the debounce and any pending idle
+# deadline before the disconnect/block sequence can run.
+run_case playing_cancels_idle no 4
+playing_cancels_idle_log="$tmp/playing_cancels_idle.log"
+assert_log_contains playing_cancels_idle "$playing_cancels_idle_log" 'player is idle; waiting 1s before starting idle timer'
+assert_log_contains playing_cancels_idle "$playing_cancels_idle_log" 'idle timer cancelled because player is playing'
+assert_log_excludes playing_cancels_idle "$playing_cancels_idle_log" 'reconnect pause marker set before idle disconnect'
+assert_log_excludes playing_cancels_idle "$playing_cancels_idle_log" 'reconnect blocked after idle timeout'
 
 echo 'power-manager smoke test: PASS'

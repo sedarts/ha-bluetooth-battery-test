@@ -27,6 +27,7 @@ RUN apk add --no-cache \
         bluez \
         bluez-deprecated \
         flock \
+        python3 \
         mosquitto-clients \
         # bluez-deprecated ajoute gatttool (ATT direct, réponse explicite pour
         # Write Request) ; bluetoothctl reste fourni par bluez et sert à gérer
@@ -90,6 +91,8 @@ COPY run.sh /run.sh
 COPY lib/power-manager.sh /opt/btui/lib/power-manager.sh
 COPY lib/renderer-recovery.sh /opt/btui/lib/renderer-recovery.sh
 COPY lib/bluetooth-ops.sh /opt/btui/lib/bluetooth-ops.sh
+COPY lib/bluetooth-process.py /opt/btui/lib/bluetooth-process.py
+RUN chmod a+x /opt/btui/lib/bluetooth-process.py
 COPY lib/wake-retries.sh /opt/btui/lib/wake-retries.sh
 COPY lib/gatt-discovery.sh /opt/btui/lib/gatt-discovery.sh
 COPY mpd.conf.template /etc/mpd.conf.template

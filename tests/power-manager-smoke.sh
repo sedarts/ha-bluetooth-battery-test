@@ -43,7 +43,14 @@ assert_wake_processed() {
 
 cat >"$tmp/bin/timeout" <<'EOF'
 #!/usr/bin/env bash
+[ "${1:-}" != -k ] || shift 2
 shift; exec "$@"
+EOF
+cat >"$tmp/bin/process-runner" <<'EOF'
+#!/usr/bin/env bash
+# Behaviour suite only; real process supervision is tested on Linux.
+shift 3
+exec "$@"
 EOF
 cat >"$tmp/bin/flock" <<'EOF'
 #!/usr/bin/env bash
@@ -96,10 +103,22 @@ EOF
 cat >"$tmp/bin/bluetoothctl" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$PM_TEST_LOG"
+if [ "${1:-}" = disconnect ]; then
+  : > "${PM_TEST_INFO_COUNT}.disconnected"
+fi
+if [ "${1:-}" = unblock ]; then
+  rm -f "${PM_TEST_INFO_COUNT}.disconnected"
+fi
 if [ "${1:-}" = info ]; then
   count=0; [ -f "$PM_TEST_INFO_COUNT" ] && count=$(cat "$PM_TEST_INFO_COUNT")
   count=$((count + 1)); printf '%s' "$count" >"$PM_TEST_INFO_COUNT"
-  [ "$count" -ge 2 ] && printf 'Connected: yes\n'; exit 0
+  sub_count=$(cat "$PM_TEST_SUB_COUNT")
+  if [ -f "${PM_TEST_RENDERER_REQUEST}" ] || { [ "${PM_TEST_SCENARIO}" = error_then_new_wake ] && [ "$sub_count" -ge 2 ]; }; then
+    printf 'Connected: yes\n'
+  else
+    printf 'Connected: no\n'
+  fi
+  exit 0
 fi
 if [ "$#" -eq 0 ]; then
   cat >>"$PM_TEST_LOG" || true
@@ -154,6 +173,7 @@ run_case() {
   PM_TEST_SUB_COUNT="$tmp/${scenario}.sub" PM_TEST_INFO_COUNT="$tmp/${scenario}.info" PM_TEST_PACTL_COUNT="$tmp/${scenario}.pactl" PM_TEST_CLOCK="$tmp/${scenario}.clock" \
   PM_PAUSE_DIR="$tmp/${scenario}.paused" \
   PM_BT_OPS_LIB="$root/lib/bluetooth-ops.sh" BT_OPS_LOCK_FILE="$tmp/${scenario}.bt.lock" \
+  BT_PROCESS_RUNNER="$tmp/bin/process-runner" \
   PM_GATT_DISCOVERY_LIB="$root/lib/gatt-discovery.sh" PM_TEST_DISCOVERY_FIXTURE="$root/tests/fixtures/gatttool-test9-discovery.txt" \
   PM_TEST_COMMAND_TOPIC='bluetooth_audio_bridge/c0288d82f7bb/power/command' \
   PM_TEST_PLAYBACK_TOPIC='bluetooth_audio_bridge/c0288d82f7bb/power/playback' PATH="$tmp/bin:$PATH" \

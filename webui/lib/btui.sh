@@ -262,7 +262,7 @@ bt_scan_session() {
     # descripteur ouvert pendant toute la session évite que bluetoothctl
     # ne voie une fin de fichier prématurée entre deux commandes.
     exec {BTUI_FIFO_FD}<>"${fifo}"
-    timeout 70 bluetoothctl <&"${BTUI_FIFO_FD}" >"${BTUI_SESSION_LOG}" 2>&1 &
+    bt_process_run 70 bluetoothctl <&"${BTUI_FIFO_FD}" >"${BTUI_SESSION_LOG}" 2>&1 &
     local bt_pid=$!
 
     {
@@ -372,6 +372,7 @@ job_start() {
     # dès que sa sortie standard est fermée, sans attendre l'opération.
     # stderr est gardé : il remonte dans le journal de l'add-on.
     (
+        BT_OPS_OWNER_PID="${BASHPID}"
         trap job_on_exit EXIT
         "job_${type}" "${mac}"
     ) </dev/null >/dev/null &
@@ -419,8 +420,8 @@ job_pair() {
     # (voir README, dépannage) : c'est l'étape la plus souvent oubliée lors
     # d'un appairage manuel, d'où son automatisation ici.
     if bt_ops_acquire "webui-pair-connect-${mac}" 10; then
-        timeout 8 bluetoothctl trust "${mac}" >/dev/null 2>&1 || true
-        timeout 8 bluetoothctl connect "${mac}" >/dev/null 2>&1 || true
+        bt_process_run 8 bluetoothctl trust "${mac}" >/dev/null 2>&1 || true
+        bt_process_run 8 bluetoothctl connect "${mac}" >/dev/null 2>&1 || true
         bt_ops_release
     else
         job_set error "Pairing completed, but the shared Bluetooth operation lock was unavailable."

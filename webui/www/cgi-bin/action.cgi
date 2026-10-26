@@ -163,7 +163,7 @@ case "${action}" in
         # trois flux redirigés : sinon httpd attendrait la fin de la commande
         # avant de répondre. Si l'enceinte est encore connectée à un autre
         # appareil, la boucle réessaiera d'elle-même.
-        (timeout 20 bluetoothctl connect "${mac}" </dev/null >/dev/null 2>&1 &)
+        (BT_OPS_OWNER_PID="${BASHPID}"; bt_process_run 20 bluetoothctl connect "${mac}"; :) </dev/null >/dev/null 2>&1 &
         # Même raison que pour la pause : on attend la connexion (huit
         # secondes au plus) avant de rafraîchir la liste.
         for _ in 1 2 3 4 5 6 7 8; do

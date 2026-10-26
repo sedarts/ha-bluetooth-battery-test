@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.6.2-test.11
+- Supervise bridge-owned Bluetooth commands with a bounded Python process
+  helper that terminates and reaps its own process tree on timeout, owner exit,
+  SIGTERM, or SIGINT without killing unrelated processes.
+- Prevent Bluetooth children from inheriting the shared adapter-lock file
+  descriptor, reject nested lock acquisition, and keep new commands suppressed
+  while power-manager cleanup is in progress.
+- Replace error cleanup that could disconnect an unknown device-wide connection
+  with bounded BlueZ state observation. A failed or busy wake now releases its
+  own resources, enters ERROR, and waits for a new explicit wake.
+- Add disconnect regressions and 15 Linux lifecycle tests for timeouts, signals,
+  descendants, lock release, Resource-busy recovery, and unknown connection
+  ownership. All 15 passed on Debian with Python 3.13.5 in an unprivileged
+  Proxmox LXC; Bluetooth, MQTT, and audio commands were simulated.
+- Install Python 3 in the add-on image and copy the dependency-free process
+  helper into the runtime. Add the Linux test guide, Resource-busy analysis, and
+  test.11 readiness report.
+- Keep audio/renderer algorithms, MQTT protocol, BLE payload, retry limits,
+  300-second idle timeout, add-on identity, and separate discovery/write
+  transport unchanged. The physical source of ATT `Resource busy` and actual
+  UE BOOM 2 power behavior remain hardware-test items.
+
 ## 2.6.2-test.10
 - Correct GATT discovery parsing for the actual BlueZ noninteractive `=`
   output and interactive `:` output; reject ambiguous/incomplete records and

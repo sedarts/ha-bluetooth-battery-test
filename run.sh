@@ -238,8 +238,8 @@ connect_speaker() {
     # du 2026-09-01) : un échec de connexion à l'enceinte ne doit jamais
     # faire tomber le script, seulement être loggé et retenté par la boucle
     # de surveillance (étape 5).
-    timeout "${timeout_seconds}" bluetoothctl power on || true
-    if timeout "${timeout_seconds}" bluetoothctl connect "${mac}"; then
+    bt_process_run "${timeout_seconds}" bluetoothctl power on || true
+    if bt_process_run "${timeout_seconds}" bluetoothctl connect "${mac}"; then
         bashio::log.info "${name} connected." || true
     else
         bashio::log.warning "Failed to connect to ${name} — will retry in the monitoring loop." || true
@@ -368,6 +368,7 @@ done
 # autre côté logique applicative (la contention possible reste au niveau du
 # radio Bluetooth physique lui-même, voir vault : test du 2026-09-06).
 monitor_speaker() {
+    local BT_OPS_OWNER_PID="${BASHPID}"
     local mac="$1" name="$2" sink="$3" card="$4" uuid="$5" port="$6"
     local info renderer_pid="" wake_request="/tmp/btui/wake/${mac^^}" wake_request_consumed=false
     # renderer_pid est une variable LOCALE à cette fonction : chaque appel de
@@ -638,7 +639,7 @@ if [ "$(bashio::config 'power_management_enabled' 2>/dev/null || echo false)" = 
         PM_IDLE_TIMEOUT="${PM_IDLE_TIMEOUT}" PM_STOP_DEBOUNCE="${PM_STOP_DEBOUNCE}" PM_BLE_WAKE="${PM_BLE_WAKE}" \
         PM_ADAPTER_MAC="${PM_ADAPTER_MAC}" PM_WAKE_BOOT_DELAY="${PM_WAKE_BOOT_DELAY}" PM_WAKE_TIMEOUT="${PM_WAKE_TIMEOUT}" PM_MQTT_HOST="${PM_MQTT_HOST}" \
         PM_MQTT_PORT="${PM_MQTT_PORT}" PM_MQTT_USER="${PM_MQTT_USER}" \
-        PM_MQTT_PASS="${PM_MQTT_PASS}" /opt/btui/lib/power-manager.sh &
+        PM_MQTT_PASS="${PM_MQTT_PASS}" /opt/btui/lib/bluetooth-process.py exec /opt/btui/lib/power-manager.sh &
     bashio::log.info "Power-management controller started (enabled=${PM_ENABLED}, BLE wake=${PM_BLE_WAKE})."
 fi
 

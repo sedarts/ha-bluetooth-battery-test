@@ -40,7 +40,11 @@ mqtt_args=(-h "${PM_MQTT_HOST}" -p "${PM_MQTT_PORT}")
 log() { printf '[%s][power-manager][op=%s] %s\n' "$(bt_ops_timestamp)" "${PM_CURRENT_OPERATION_ID:-${BT_OP_ID:-none}}" "$*"; }
 publish() { timeout 8 mosquitto_pub "${mqtt_args[@]}" -t "${state_topic}" -m "$1" -r >/dev/null 2>&1 || log "MQTT status publish failed"; }
 publish_management() { timeout 8 mosquitto_pub "${mqtt_args[@]}" -t "${management_topic}" -m "$1" -r >/dev/null 2>&1 || log "MQTT management-state publish failed"; }
-connected() { bluetoothctl info "${PM_MAC}" 2>/dev/null | grep -q '^[[:space:]]*Connected: yes'; }
+connected() {
+  local info
+  info=$(bt_process_run 3 bluetoothctl info "${PM_MAC}" 2>/dev/null) || return 1
+  grep -q '^[[:space:]]*Connected: yes' <<<"${info}"
+}
 a2dp_ready() {
   local sink="bluez_sink.${PM_MAC//:/_}.a2dp_sink" sinks
   sinks=$(pactl list short sinks 2>/dev/null) || return 1
@@ -62,16 +66,57 @@ request_renderer_handover() {
 # by its discovered properties. gatttool is used because this BlueZ 5.66 image's
 # bluetoothctl has no `bearer` command and exits before its async WriteValue
 # result can be observed. The final byte is 01 (on) or 02 (off).
-ble_release_link() {
-  local phase="$1" output status=0
-  log "BLE link release start phase=${phase} device=${PM_MAC}"
-  output=$(timeout 5 bluetoothctl disconnect "${PM_MAC}" 2>&1) || status=$?
-  log "BLE link release returned phase=${phase} exit=${status}: ${output//$'\n'/; }; link teardown is not independently confirmed"
-  # Disconnect can fail because the target is already disconnected. Discovery
-  # remains the next bounded attempt; do not reset the adapter or other devices.
+ble_run() {
+  local seconds="$1" remaining
+  shift
+  if [ "${PM_BLE_END:-0}" -gt 0 ]; then
+    remaining=$((PM_BLE_END - SECONDS))
+    [ "${remaining}" -gt 0 ] || return 124
+    [ "${seconds}" -le "${remaining}" ] || seconds="${remaining}"
+  fi
+  # The supervisor terminates/reaps only its own command tree.
+  bt_process_run "${seconds}" "$@"
 }
 
-ble_power_command_once() {
+ble_release_link() {
+  local phase="$1" check
+  # This synchronous helper must never run after its caller releases the lock.
+  [ -n "${BT_OPS_FD:-}" ] || { log "BLE cleanup skipped: no operation lock"; return 1; }
+  log "BLE link release start phase=${phase} device=${PM_MAC}"
+  if ble_link_is_disconnected "${phase}-before"; then
+    log "BLE link already disconnected according to BlueZ; direct ATT ownership remains unknown"
+    return 0
+  fi
+  log "BLE link ownership unknown phase=${phase}; no device-wide disconnect; bounded observation only"
+  for check in 1 2 3 4; do
+    if ble_link_is_disconnected "${phase}-after-${check}"; then
+      log "BLE link disconnected according to BlueZ phase=${phase}; direct ATT ownership remains unknown"
+      return 0
+    fi
+    [ "${PM_BLE_END:-0}" -eq 0 ] || [ "${SECONDS}" -lt "${PM_BLE_END}" ] || break
+    [ "${check}" -eq 4 ] || sleep 1
+  done
+  log "BLE link release unconfirmed phase=${phase}; no GATT connection permitted"
+  return 1
+}
+
+ble_link_is_disconnected() {
+  local output status=0
+  output=$(ble_run 2 bluetoothctl info "${PM_MAC}" 2>&1) || status=$?
+  log "BLE link state phase=$1 exit=${status}: ${output//$'\n'/; }"
+  [ "${status}" -eq 0 ] &&
+    grep -Eq '^[[:space:]]*Connected: no[[:space:]]*$' <<<"${output}" &&
+    ! grep -Eq '^[[:space:]]*Connected: yes[[:space:]]*$' <<<"${output}"
+}
+
+ble_power_command_once() (
+  # EXIT runs synchronously before the waiting parent can release its lock or
+  # start a newer wake. Never schedule a delayed/background disconnect.
+  trap 'rc=$?; trap - EXIT; log "BLE attempt-cleanup: own command processes reaped; no device-wide disconnect"; exit "$rc"' EXIT
+  ble_power_command_body "$@"
+)
+
+ble_power_command_body() {
   local action="$1" command_byte="$2" hex="" octet discovery status=0 uuid="c6d6dc0d-07f5-47ef-9b59-630622b01fd3"
   local handle properties write_flag write_flag_name write_args output
   [ -n "${PM_ADAPTER_MAC}" ] || { log "BLE power command unavailable: paired-host MAC is not configured"; return 1; }
@@ -79,10 +124,10 @@ ble_power_command_once() {
   for octet in ${PM_ADAPTER_MAC//:/ }; do printf -v octet '%02x' "$((16#${octet}))"; hex+="${octet}"; done
   printf -v octet '%02x' "$((16#${command_byte}))"; hex+="${octet}"
 
-  # Release a Classic connection before opening the LE ATT connection.
-  ble_release_link "before-${action}-discovery"
+  # Observe a disconnected state; do not evict an unknown connection owner.
+  ble_release_link "before-${action}-discovery" || return 1
   log "BLE ${action} GATT discovery start device=${PM_MAC} uuid=${uuid}"
-  discovery=$(timeout 5 gatttool --adapter hci0 --device "${PM_MAC}" --characteristics --uuid "${uuid}" 2>&1) || status=$?
+  discovery=$(ble_run 5 gatttool --adapter hci0 --device "${PM_MAC}" --characteristics --uuid "${uuid}" 2>&1) || status=$?
   log "BLE ${action} GATT discovery process exited status=${status}: ${discovery//$'\n'/; }"
   if [ "${status}" -ne 0 ] || grep -Eqi 'failed|error|not connected|not found' <<<"${discovery}"; then
     log "BLE ${action} GATT discovery failed (gatttool exit ${status}): ${discovery//$'\n'/; }"
@@ -110,7 +155,7 @@ ble_power_command_once() {
   # Separate one-shot processes reconnect for the write. Do not insert a sleep
   # or another BlueZ operation between discovery and this ATT request.
   log "BLE ${action} GATT write ${write_flag_name} start value_handle=${handle}"
-  output=$(timeout 5 gatttool --adapter hci0 --device "${PM_MAC}" "${write_args[@]}" --handle "${handle}" --value="${hex}" 2>&1) || status=$?
+  output=$(ble_run 5 gatttool --adapter hci0 --device "${PM_MAC}" "${write_args[@]}" --handle "${handle}" --value="${hex}" 2>&1) || status=$?
   log "BLE ${action} GATT write process exited status=${status}: ${output//$'\n'/; }"
   if [ "${status}" -ne 0 ] || grep -Eqi 'failed|error|protocol error|not permitted|not authorized' <<<"${output}"; then
     log "BLE ${action} GATT write ${write_flag_name} failed (gatttool exit ${status}): ${output//$'\n'/; }"
@@ -125,14 +170,21 @@ ble_power_command_once() {
   else
     log "BLE ${action} GATT write command submitted; ATT confirmation is not defined for Write Command, physical speaker action remains unconfirmed"
   fi
-  ble_release_link "after-${action}-write"
+  # The supervisor has reaped the command; no device-wide disconnect follows.
   return 0
 }
 
 ble_power_command_locked() {
   local action="$1" command_byte="$2" attempt rc=1 output state_label=POWERING_OFF
+  local PM_BLE_END=0 remaining
+  if [ "${action}" = wake ]; then
+    remaining=$((PM_CURRENT_WAKE_DEADLINE - $(date +%s)))
+    [ "${remaining}" -gt 0 ] || return 1
+    PM_BLE_END=$((SECONDS + remaining))
+  fi
   [ "${action}" = wake ] && state_label=WAKING
   for attempt in 1 2 3; do
+    [ "${PM_BLE_END}" -eq 0 ] || [ "${SECONDS}" -lt "${PM_BLE_END}" ] || break
     log "state=${state_label} operation=ble-${action} attempt=${attempt}/3 start"
     output=$(ble_power_command_once "${action}" "${command_byte}" 2>&1) && rc=0 || rc=$?
     printf '%s\n' "${output}"
@@ -229,7 +281,7 @@ wake_impl() {
   if ! bt_ops_acquire "wake-${PM_MAC}" 18; then
     fail_wake "${renderer_request}"; return
   fi
-  if timeout 8 bluetoothctl unblock "${PM_MAC}" >/dev/null 2>&1; then
+  if bt_ops_unblock_locked "${PM_MAC}" >/dev/null 2>&1; then
     log "Bluetooth reconnect block cleared"
   else
     log "Bluetooth unblock request failed or device was already unblocked"
@@ -356,11 +408,33 @@ handle() {
 }
 
 if [ -z "${PM_MQTT_HOST}" ]; then log "MQTT not configured; power management unavailable"; exit 0; fi
-cleanup() { clear_discovery; }
-if [ "${PM_TEST_MAX_LOOPS}" -eq 0 ]; then
-  trap cleanup EXIT
-  trap 'cleanup; exit 0' INT TERM
-fi
+PM_PROCESS_DIR=$(mktemp -d) || exit 1
+BT_OPS_STOP_FILE="${PM_PROCESS_DIR}/stop"
+PM_CLEANED=false
+cleanup() {
+  [ "${PM_CLEANED}" = false ] || return 0
+  PM_CLEANED=true
+  trap '' INT TERM
+  : > "${BT_OPS_STOP_FILE}"
+  log "process cleanup: stop requested; waiting for owned commands"
+  while compgen -G "${PM_PROCESS_DIR}/child-*" >/dev/null; do sleep 0.05; done
+  if [[ "${PM_CURRENT_OPERATION_ID:-}" == wake-* ]]; then
+    mkdir -p "${PM_PAUSE_DIR}" "${PM_RENDERER_DIR}"
+    printf '0\n' > "${PM_PAUSE_DIR}/${PM_MAC^^}"
+    rm -f "${PM_RENDERER_DIR}/${PM_MAC^^}" "${PM_RENDERER_DIR}/${PM_MAC^^}.renderer_ready"
+    : > "${PM_RENDERER_DIR}/${PM_MAC^^}.error"
+  fi
+  bt_ops_release
+  log "process cleanup: owned commands ended; lock released; no disconnect"
+  [ "${PM_TEST_MAX_LOOPS}" -ne 0 ] || clear_discovery
+  # Keep stop visible until all command substitutions have unwound; only the
+  # stopped root process removes its private directory at final exit.
+  rm -f "${BT_OPS_STOP_FILE}"
+  rmdir "${PM_PROCESS_DIR}" 2>/dev/null || true
+}
+trap cleanup EXIT
+trap 'cleanup; exit 143' TERM
+trap 'cleanup; exit 130' INT
 publish_discovery
 [ "${PM_ENABLED}" = true ] && publish_management enabled || publish_management disabled
 

@@ -244,7 +244,7 @@ with this repository's URL pre-filled, just confirm to add it.
 | `default_volume` | Volume (%) automatically restored if the speaker's PulseAudio sink is ever found muted or at 0% (otherwise stays silent indefinitely, even across reboots). Never overrides a volume you've deliberately set as long as it isn't 0%. | `70` |
 | `renderer_volume` | Volume level (as shown by the volume slider of the `media_player` in Home Assistant) each speaker's `media_player` starts at, every time the app starts or the speaker reconnects. The safe default is `30`; existing configured values are preserved. Not the same as `default_volume`, which only concerns the speaker's PulseAudio sink. | `30` |
 | `power_management_enabled` | Enables the opt-in primary-speaker power controller and its MQTT Discovery entities. Existing reconnect behaviour is unchanged while disabled. | `false` |
-| `idle_timeout` | Delay in seconds after confirmed stopped playback before Bluetooth audio is disconnected. | `300` |
+| `idle_timeout` | Delay in seconds after confirmed stopped playback before the BLE power-off attempt (30-3600). test.14 also migrates the former test-channel default value `300` to `30` at runtime. | `30` |
 | `stop_debounce` | Seconds a `paused`, `idle`, `off`, or `stopped` player state must remain current before the idle timer begins. | `10` |
 | `ble_wake_enabled` | Enables reverse-engineered UE BOOM 2 BLE power commands (`01` wake, `02` power-off). Keep off until validated on this speaker and host. | `false` |
 | `ble_adapter_mac` | MAC address of a host already paired with the UE BOOM 2, used in its BLE power frame (often the local adapter, but verify pairing). Required when BLE power control is enabled. | *(empty)* |
@@ -263,13 +263,16 @@ Home Assistant must publish the actual `media_player` state to
 `bluetooth_audio_bridge/<speaker-mac-without-colons>/power/playback`. Only `playing`
 cancels an idle timer; `paused`, `idle`, `off`, and `stopped` first pass through
 `stop_debounce`, then start `idle_timeout`. DLNA/UPnP requests are never treated as
-activity. When BLE power control is enabled, the bridge releases the Classic link
-so BlueZ can select LE, submits the reverse-engineered `02` power-off command, then
-disconnects and blocks reconnection. Because the BOOM power characteristic is write-without-response
-and exposes no reliable physical power-state readback, the bridge publishes
+activity. When BLE power control is enabled, the bridge uses a bounded BlueZ GATT
+session to submit the reverse-engineered `02` power-off command without first
+tearing down an unknown device-wide connection. Only after the write is submitted
+does it disconnect Classic audio and block reconnection. If the write fails, audio
+and automatic reconnect remain available and the state becomes `power_off_failed`.
+Because the BlueZ CLI transcript exposes neither a definitive ATT response nor
+reliable physical power-state readback, the bridge publishes
 `power_state_unknown` rather than claiming that the speaker physically turned off.
-When BLE power control is disabled or its paired-host MAC is missing, it only
-disconnects audio and likewise reports the physical state as unknown.
+When BLE power control is disabled or its paired-host MAC is missing, working
+audio is preserved and the power-off attempt is reported as failed.
 
 For a BLE wake, submitting the GATT write is not proof that the speaker received
 or acted on the power-on request. After the short boot delay, the bridge releases its reconnect

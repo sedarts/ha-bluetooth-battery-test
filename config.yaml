@@ -14,7 +14,7 @@ name: "Bluetooth Audio Bridge 2.6.2 Test"
 # Ancien nom : "Bluetooth Speaker MPD Bridge" (ancien nom encore avant :
 # "MPD JBL Bridge").
 
-version: "2.6.2-test.13"
+version: "2.6.2-test.14"
 # Version de l'add-on. À incrémenter à chaque modification si on veut
 # que le Supervisor propose une "mise à jour" plus tard.
 # Bump en 2.0.0 : changement de nom/slug (rupture de compatibilité pour
@@ -189,7 +189,7 @@ options:
   battery_mqtt_username: ""
   battery_mqtt_password: ""
   power_management_enabled: false
-  idle_timeout: 300
+  idle_timeout: 30
   stop_debounce: 10
   ble_wake_enabled: false
   ble_adapter_mac: ""
@@ -217,7 +217,7 @@ schema:
   battery_mqtt_username: "str?"
   battery_mqtt_password: "password?"
   power_management_enabled: "bool?"
-  idle_timeout: "int(60,3600)?"
+  idle_timeout: "int(30,3600)?"
   stop_debounce: "int(1,120)?"
   ble_wake_enabled: "bool?"
   ble_adapter_mac: "match(^$|^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$)?"

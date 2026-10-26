@@ -81,7 +81,7 @@ count=$((count + 1)); printf '%s' "$count" >"$PM_TEST_SUB_COUNT"
 case "${PM_TEST_SCENARIO}:${count}" in
   success:1|ble_only:1|connected_yes_no_a2dp:1|gatt_error:1|monitor_handover:1|missing_confirmation:1|error_then_new_wake:1|error_then_new_wake:2|resource_busy:1|resource_busy_exhausted:1|adapter_error:1|write_exit_failure:1|write_timeout:1) printf '%s wake\n' "$PM_TEST_COMMAND_TOPIC" ;;
   success:2|success:3) printf '%s idle\n' "$PM_TEST_PLAYBACK_TOPIC" ;;
-  playing_cancels_idle:1) printf '%s idle\n' "$PM_TEST_PLAYBACK_TOPIC" ;;
+  playing_cancels_idle:1|idle_off_failure:1) printf '%s idle\n' "$PM_TEST_PLAYBACK_TOPIC" ;;
   playing_cancels_idle:2) printf '%s playing\n' "$PM_TEST_PLAYBACK_TOPIC" ;;
 esac
 EOF
@@ -213,7 +213,9 @@ assert_log_contains success "$success_log" 'select-attribute c6d6dc0d-07f5-47ef-
 assert_log_contains success "$success_log" 'write "140 104 171 224 63 246 1"'
 assert_log_contains success "$success_log" '[BLE][op='
 assert_log_contains success "$success_log" 'Write result=request-submitted att_response=unconfirmed physical_power=unconfirmed'
-assert_log_contains success "$success_log" '--char-write-req --handle 0x0003 --value=8c68abe03ff602'
+assert_log_contains success "$success_log" 'write "140 104 171 224 63 246 2"'
+assert_log_contains success "$success_log" 'Power-off write result=request-submitted att_response=unconfirmed physical_power=unconfirmed'
+assert_log_excludes success "$success_log" 'gatttool --adapter hci0 --device C0:28:8D:82:F7:BB --char-write'
 assert_log_excludes success "$success_log" 'bearer'
 assert_log_contains success "$success_log" 'physical power state remains unknown until independently observed'
 assert_log_contains success "$success_log" 'normal reconnect monitor released after BLE wake'
@@ -236,7 +238,7 @@ wake_pause_line=$(grep -n 'reconnect pause set before waiting for shared Bluetoo
 wake_release_line=$(grep -n 'normal reconnect monitor released after BLE wake' "$success_log" | head -n1 | cut -d: -f1)
 waiting_classic_line=$(grep -n -- '-m waiting_for_classic' "$success_log" | head -n1 | cut -d: -f1)
 [ "$wake_pause_line" -lt "$unblock_line" ] && [ "$unblock_line" -lt "$wake_release_line" ] && [ "$wake_release_line" -lt "$waiting_classic_line" ]
-marker_line=$(grep -n 'reconnect pause marker set before idle disconnect' "$success_log" | head -n1 | cut -d: -f1)
+marker_line=$(grep -n 'reconnect pause marker set before idle power-off' "$success_log" | head -n1 | cut -d: -f1)
 disconnect_line=$(grep -n 'disconnect C0:28:8D:82:F7:BB' "$success_log" | tail -n1 | cut -d: -f1)
 block_line=$(grep -n '^block C0:28:8D:82:F7:BB' "$success_log" | head -n1 | cut -d: -f1)
 [ "$marker_line" -lt "$disconnect_line" ] && [ "$disconnect_line" -lt "$block_line" ]
@@ -333,7 +335,19 @@ run_case playing_cancels_idle no 4
 playing_cancels_idle_log="$tmp/playing_cancels_idle.log"
 assert_log_contains playing_cancels_idle "$playing_cancels_idle_log" 'player is idle; waiting 1s before starting idle timer'
 assert_log_contains playing_cancels_idle "$playing_cancels_idle_log" 'idle timer cancelled because player is playing'
-assert_log_excludes playing_cancels_idle "$playing_cancels_idle_log" 'reconnect pause marker set before idle disconnect'
-assert_log_excludes playing_cancels_idle "$playing_cancels_idle_log" 'reconnect blocked after idle timeout'
+assert_log_excludes playing_cancels_idle "$playing_cancels_idle_log" 'reconnect pause marker set before idle power-off'
+assert_log_excludes playing_cancels_idle "$playing_cancels_idle_log" 'reconnect blocked after submitted BLE power-off'
+
+# A failed power-off write must not tear down working audio or leave the
+# reconnect monitor paused/blocked. The failure remains visible to MQTT.
+run_case idle_off_failure no 5 yes
+idle_off_failure_log="$tmp/idle_off_failure.log"
+assert_log_contains idle_off_failure "$idle_off_failure_log" 'Power-off write result=error exit=1'
+assert_log_contains idle_off_failure "$idle_off_failure_log" 'BLE power-off could not be submitted; keeping A2DP and automatic reconnect available'
+assert_log_contains idle_off_failure "$idle_off_failure_log" 'reconnect pause cleared after failed BLE power-off'
+assert_log_contains idle_off_failure "$idle_off_failure_log" '-m power_off_failed'
+assert_log_excludes idle_off_failure "$idle_off_failure_log" 'disconnect C0:28:8D:82:F7:BB'
+assert_log_excludes idle_off_failure "$idle_off_failure_log" 'block C0:28:8D:82:F7:BB'
+[ ! -e "$tmp/idle_off_failure.paused/C0:28:8D:82:F7:BB" ]
 
 echo 'power-manager smoke test: PASS'

@@ -56,6 +56,17 @@ grep -q '^bash -c' "$tmp/calls"
 grep -q 'attempt-cleanup: own command processes reaped' "$tmp/log"
 echo 'PASS: connected state does not gate BlueZ wake and cleanup is scoped'
 
+# The same generic Connected=yes state must not veto the separate BlueZ
+# power-off path. It targets the known UUID with the paired-host payload ending
+# in 02 and does not disconnect the device before the write.
+: > "$tmp/calls"
+ble_power_command_once off 02 > "$tmp/log"
+grep -q 'Power-off write result=request-submitted' "$tmp/log"
+grep -q 'c6d6dc0d-07f5-47ef-9b59-630622b01fd3 140 104 171 224 63 246 2' "$tmp/calls"
+! grep -q 'bluetoothctl disconnect' "$tmp/calls"
+grep -q 'attempt-cleanup: own command processes reaped' "$tmp/log"
+echo 'PASS: connected state allows scoped BlueZ power-off without pre-write disconnect'
+
 # Synchronous EXIT cleanup also covers early command failure / explicit exit.
 for status in 1 143; do
   scenario=already

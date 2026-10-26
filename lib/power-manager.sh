@@ -6,7 +6,7 @@ set -u -o pipefail
 . "${PM_BT_OPS_LIB:-/opt/btui/lib/bluetooth-ops.sh}"
 . "${PM_GATT_DISCOVERY_LIB:-/opt/btui/lib/gatt-discovery.sh}"
 
-: "${PM_MAC:?}" "${PM_NAME:?}" "${PM_ENABLED:=false}" "${PM_IDLE_TIMEOUT:=300}" "${PM_STOP_DEBOUNCE:=10}"
+: "${PM_MAC:?}" "${PM_NAME:?}" "${PM_ENABLED:=false}" "${PM_IDLE_TIMEOUT:=30}" "${PM_STOP_DEBOUNCE:=10}"
 : "${PM_BLE_WAKE:=false}" "${PM_ADAPTER_MAC:=}" "${PM_MQTT_HOST:=}"
 : "${PM_MQTT_PORT:=1883}" "${PM_MQTT_USER:=}" "${PM_MQTT_PASS:=}"
 : "${PM_WAKE_TIMEOUT:=90}"
@@ -15,7 +15,7 @@ set -u -o pipefail
 : "${PM_PAUSE_DIR:=/tmp/btui/paused}"
 : "${PM_RENDERER_DIR:=/tmp/btui/wake}"
 
-[[ "${PM_IDLE_TIMEOUT}" =~ ^[0-9]+$ ]] || PM_IDLE_TIMEOUT=300
+[[ "${PM_IDLE_TIMEOUT}" =~ ^[0-9]+$ ]] || PM_IDLE_TIMEOUT=30
 [[ "${PM_STOP_DEBOUNCE}" =~ ^[0-9]+$ ]] || PM_STOP_DEBOUNCE=10
 [[ "${PM_WAKE_TIMEOUT}" =~ ^[0-9]+$ ]] || PM_WAKE_TIMEOUT=90
 [[ "${PM_WAKE_BOOT_DELAY}" =~ ^[0-9]+$ ]] || PM_WAKE_BOOT_DELAY=5
@@ -77,9 +77,10 @@ request_renderer_handover() {
 }
 
 # Wake uses the BlueZ bluetoothctl GATT session that physically woke this UE
-# BOOM 2 in test.5. Power-off retains the separately validated direct ATT path.
-# Both transports remain bounded by the test.12 process supervisor. The final
-# byte is 01 (on) or 02 (off).
+# BOOM 2 in test.5. Power-off uses its own BlueZ session so an active Classic
+# bearer is not mistaken for a foreign ATT owner. Both operations remain
+# bounded by the test.12 process supervisor. The final byte is 01 (on) or 02
+# (off).
 ble_run() {
   local seconds="$1" remaining
   shift
@@ -136,8 +137,10 @@ ble_power_command_once() (
   trap ble_attempt_cleanup EXIT
   if [ "$1" = wake ]; then
     ble_wake_bluez_body "$@"
+  elif [ "$1" = off ]; then
+    ble_off_bluez_body "$@"
   else
-    ble_power_command_body "$@"
+    return 1
   fi
 )
 
@@ -193,11 +196,62 @@ ble_wake_bluez_body() {
   return 0
 }
 
+ble_off_bluez_body() {
+  local action="$1" command_byte="$2" bytes="" octet output status=0
+  local uuid="c6d6dc0d-07f5-47ef-9b59-630622b01fd3" value_handle="0x0003"
+  [ -n "${PM_ADAPTER_MAC}" ] || { flow_log BLE "Power-off result=error reason=paired-host-mac-missing"; return 1; }
+  [ "${action}" = off ] && [ "${command_byte}" = 02 ] || return 1
+  for octet in ${PM_ADAPTER_MAC//:/ }; do bytes+="$((16#${octet})) "; done
+  bytes+="2"
+
+  output=$(ble_run 3 bluetoothctl show 2>&1) || status=$?
+  if [ "${status}" -ne 0 ] || ! grep -Eq '^[[:space:]]*Powered: yes[[:space:]]*$' <<<"${output}"; then
+    flow_log BLE "Adapter ready result=error exit=${status} details=${output//$'\n'/; }"
+    return 1
+  fi
+  flow_log BLE "Adapter ready result=ok controller=${PM_ADAPTER_MAC}"
+
+  # Device1.Connected may represent the active Classic/A2DP bearer. It is
+  # diagnostic only and must not veto a BlueZ-managed GATT operation.
+  status=0
+  output=$(ble_run 3 bluetoothctl info "${PM_MAC}" 2>&1) || status=$?
+  flow_log BLE "Device state result=$([ "${status}" -eq 0 ] && echo observed || echo unavailable) exit=${status} details=${output//$'\n'/; }"
+  status=0
+  flow_log BLE "Connecting GATT result=start device=${PM_MAC} transport=BlueZ purpose=power-off"
+  output=$(ble_run 12 bluetoothctl connect "${PM_MAC}" 2>&1) || status=$?
+  flow_log BLE "Connecting GATT result=$([ "${status}" -eq 0 ] && echo requested || echo inconclusive) exit=${status} details=${output//$'\n'/; }"
+  sleep 1
+
+  flow_log BLE "Characteristic selection result=requested uuid=${uuid} value_handle=${value_handle}"
+  flow_log BLE "Power-off write requested result=start uuid=${uuid} value_handle=${value_handle} payload=${PM_ADAPTER_MAC//:/}02"
+  status=0
+  output=$(ble_run 12 bash -c '
+    {
+      printf "menu gatt\nselect-attribute %s\nattribute-info\nwrite \"%s\"\n" "$1" "$2"
+      sleep 1
+      printf "quit\n"
+    } | bluetoothctl
+  ' bluez-gatt-off "${uuid}" "${bytes}" 2>&1) || status=$?
+  if [ "${status}" -ne 0 ] || grep -Eqi 'failed|error|invalid|too many|not available|not permitted|not authorized' <<<"${output}"; then
+    flow_log BLE "Power-off write result=error exit=${status} details=${output//$'\n'/; }"
+    return 1
+  fi
+  if ! grep -Eq 'Attempting to write .*/char0002' <<<"${output}"; then
+    flow_log BLE "Power-off write result=unconfirmed exit=${status} reason=write-attempt-not-observed details=${output//$'\n'/; }"
+    return 1
+  fi
+  flow_log BLE "Characteristic found result=confirmed-by-write-target uuid=${uuid} value_handle=${value_handle}"
+  flow_log BLE "Power-off write result=request-submitted att_response=unconfirmed physical_power=unconfirmed"
+  log "BLE power-off write submitted by bluetoothctl; ATT response and physical speaker action remain unconfirmed"
+  return 0
+}
+
 ble_power_command_body() {
   local action="$1" command_byte="$2" hex="" octet discovery status=0 uuid="c6d6dc0d-07f5-47ef-9b59-630622b01fd3"
   local handle properties write_flag write_flag_name write_args output
   [ -n "${PM_ADAPTER_MAC}" ] || { log "BLE power command unavailable: paired-host MAC is not configured"; return 1; }
-  # The direct ATT implementation is intentionally not a wake fallback.
+  # Legacy direct-ATT helper retained for parser/process regression coverage;
+  # the active wake and power-off dispatcher above does not call it.
   [ "${action}" = off ] || return 1
   for octet in ${PM_ADAPTER_MAC//:/ }; do printf -v octet '%02x' "$((16#${octet}))"; hex+="${octet}"; done
   printf -v octet '%02x' "$((16#${command_byte}))"; hex+="${octet}"
@@ -547,41 +601,52 @@ while true; do
     idle_deadline=0
     PM_CURRENT_OPERATION_ID="idle-$$-$(date +%s)"
     mkdir -p "${PM_PAUSE_DIR}"
-    printf '0\n' > "${PM_PAUSE_DIR}/${PM_MAC^^}"
-    log "reconnect pause marker set before idle disconnect"
+    pause_marker="${PM_PAUSE_DIR}/${PM_MAC^^}"
+    printf '0\n' > "${pause_marker}"
+    log "reconnect pause marker set before idle power-off"
     if bt_ops_acquire "idle-poweroff-${PM_MAC}" 20; then
+      power_off_submitted=false
       if [ "${PM_BLE_WAKE}" = true ] && [ -n "${PM_ADAPTER_MAC}" ]; then
         mode="powering_off"; publish "${mode}"
         if ble_power_command_locked off 02; then
+          power_off_submitted=true
           mode="power_state_unknown"; publish "${mode}"
           log "BLE power-off command submitted after idle; physical power state remains unknown until independently observed"
         else
-          mode="power_state_unknown"; publish "${mode}"
-          log "BLE power-off could not be submitted; physical power state remains unknown"
+          mode="power_off_failed"; publish "${mode}"
+          log "BLE power-off could not be submitted; keeping A2DP and automatic reconnect available"
         fi
       else
-        mode="power_state_unknown"; publish "${mode}"
-        log "idle disconnect only; BLE power-off disabled or paired-host MAC missing; physical power state unknown"
+        mode="power_off_failed"; publish "${mode}"
+        log "BLE power-off unavailable; keeping A2DP and automatic reconnect available"
       fi
-      if bt_ops_disconnect_locked "${PM_MAC}" >/dev/null 2>&1; then
-        log "A2DP disconnected after idle timeout"
+      if [ "${power_off_submitted}" = true ]; then
+        if bt_ops_disconnect_locked "${PM_MAC}" >/dev/null 2>&1; then
+          log "A2DP disconnected after submitted BLE power-off"
+        else
+          log "A2DP disconnect request failed or speaker was already disconnected"
+        fi
+        # Blocking remains paired; wake() reverses the block before reconnect.
+        if bt_ops_block_locked "${PM_MAC}" >/dev/null 2>&1; then
+          log "reconnect blocked after submitted BLE power-off"
+        else
+          log "failed to block reconnect after submitted BLE power-off"
+        fi
       else
-        log "A2DP disconnect request failed or speaker was already disconnected"
-      fi
-      # Blocking remains paired; wake() reverses the block before reconnect.
-      if bt_ops_block_locked "${PM_MAC}" >/dev/null 2>&1; then
-        log "reconnect blocked after idle timeout"
-      else
-        log "failed to block reconnect after idle timeout"
+        rm -f "${pause_marker}"
+        log "reconnect pause cleared after failed BLE power-off"
       fi
       bt_ops_release
     else
-      mode="power_state_unknown"; publish "${mode}"
-      log "idle Bluetooth operation skipped: shared lock unavailable; physical power state unknown"
+      rm -f "${pause_marker}"
+      mode="power_off_failed"; publish "${mode}"
+      log "idle Bluetooth operation skipped: shared lock unavailable; reconnect pause cleared"
     fi
     # Link teardown proves only that the Bluetooth connection was dropped;
     # the BLE power characteristic has no response or status readback.
-    mode="power_state_unknown"; publish "${mode}"
+    if [ "${mode}" != power_off_failed ]; then
+      mode="power_state_unknown"; publish "${mode}"
+    fi
     PM_CURRENT_OPERATION_ID=""
   fi
   loop_count=$((loop_count + 1))

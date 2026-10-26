@@ -644,7 +644,14 @@ if [ "$(bashio::config 'power_management_enabled' 2>/dev/null || echo false)" = 
     || [ "$(bashio::config 'battery_mqtt_enabled' 2>/dev/null || echo false)" = "true" ] \
     || [ "${BLE_WAKE_ENABLED}" = "true" ]; then
     PM_ENABLED=$(bashio::config 'power_management_enabled' 2>/dev/null || echo false)
-    PM_IDLE_TIMEOUT=$(bashio::config 'idle_timeout' 2>/dev/null || echo 300)
+    PM_IDLE_TIMEOUT=$(bashio::config 'idle_timeout' 2>/dev/null || echo 30)
+    # Supervisor preserves existing option values across an update. Migrate
+    # the former test-channel default so test.14 really uses the requested
+    # 30-second idle period without requiring a manual options save.
+    if [ "${PM_IDLE_TIMEOUT}" = 300 ]; then
+        bashio::log.info "Migrating the historical 300s idle timeout to 30s for test.14." || true
+        PM_IDLE_TIMEOUT=30
+    fi
     PM_STOP_DEBOUNCE=$(bashio::config 'stop_debounce' 2>/dev/null || echo 10)
     PM_BLE_WAKE=$(bashio::config 'ble_wake_enabled' 2>/dev/null || echo false)
     PM_ADAPTER_MAC=$(bashio::config 'ble_adapter_mac' 2>/dev/null || echo '')

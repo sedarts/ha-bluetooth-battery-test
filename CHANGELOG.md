@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.6.2-test.14
+- Reduce the test-channel idle timeout from 300 to 30 seconds while retaining
+  the existing 10-second stopped-state debounce. Migrate the historical
+  persisted default at runtime so an update reaches the intended roughly
+  40-second idle-to-power-off timing without a manual options save.
+- Replace the blocked direct-ATT power-off path with a bounded BlueZ
+  `bluetoothctl` GATT session targeting the unchanged UE BOOM 2 power UUID and
+  paired-controller payload ending in `02`. The proven test.13 wake function,
+  its `01` payload, A2DP handover and renderer path are unchanged.
+- Treat `Device1.Connected: yes` as diagnostic bearer state during power-off,
+  not as an ownership veto. Keep the shared Bluetooth lock, process supervisor,
+  timeouts and scoped cleanup; never issue a pre-write device-wide disconnect.
+- If the power-off write is not submitted, publish `power_off_failed`, preserve
+  A2DP, clear the reconnect pause and do not block reconnection. Resource-busy
+  retries remain bounded; other failures are not blindly repeated.
+- Add regressions for the BlueZ `02` write, failure-state reporting, retained
+  audio/reconnect behavior and playback cancellation of a pending idle timer.
+  Physical shutdown remains a separate hardware validation.
+
 ## 2.6.2-test.13
 - Restore the UE BOOM 2 wake transport that physically succeeded in test.5:
   one bounded BlueZ `bluetoothctl` GATT session selects the known power UUID

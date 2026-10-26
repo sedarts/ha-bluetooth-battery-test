@@ -9,12 +9,16 @@ source <(sed -n '/^ble_run()/,/^wait_for_renderer_ready()/p' "$root/lib/power-ma
 PM_MAC=C0:28:8D:82:F7:BB
 BT_OPS_FD=99
 log() { printf '%s\n' "$*"; }
+flow_log() { local category="$1"; shift; log "[${category}] $*"; }
 sleep() { printf 'poll-delay\n' >> "$tmp/calls"; }
 bt_process_run() {
   shift
   printf '%s\n' "$*" >> "$tmp/calls"
   [ "$2" != disconnect ] || { echo 'UNSAFE disconnect' >&2; return 99; }
   [ "$scenario" != timeout ] || return 124
+  if [ "$1" = bluetoothctl ] && [ "${2:-}" = show ]; then echo 'Powered: yes'; return 0; fi
+  if [ "$1" = bluetoothctl ] && [ "${2:-}" = connect ]; then echo 'Connection successful'; return 0; fi
+  if [ "$1" = bash ]; then echo 'Attempting to write /org/bluez/hci0/dev_C0_28_8D_82_F7_BB/service0001/char0002'; return 0; fi
   local n=0
   [ ! -f "$tmp/count" ] || n=$(<"$tmp/count")
   n=$((n + 1)); printf '%s' "$n" > "$tmp/count"
@@ -41,18 +45,21 @@ for scenario in already immediate delayed timeout busy unknown; do
   echo "PASS: $scenario"
 done
 
-# The real body must stop before discovery when teardown is unconfirmed.
+# Connected=yes is no longer an ownership veto for the historical BlueZ GATT
+# wake. It must proceed without a blanket device-wide disconnect.
 scenario=busy
 PM_ADAPTER_MAC=8C:68:AB:E0:3F:F6
-if ble_power_command_once wake 01 > "$tmp/log"; then exit 1; fi
-! grep -q 'GATT discovery start' "$tmp/log"
+ble_power_command_once wake 01 > "$tmp/log"
+grep -q 'Write result=request-submitted' "$tmp/log"
+grep -q '^bash -c' "$tmp/calls"
+! grep -q 'bluetoothctl disconnect' "$tmp/calls"
 grep -q 'attempt-cleanup: own command processes reaped' "$tmp/log"
-echo 'PASS: incomplete disconnect gates discovery and cleans up'
+echo 'PASS: connected state does not gate BlueZ wake and cleanup is scoped'
 
 # Synchronous EXIT cleanup also covers early command failure / explicit exit.
 for status in 1 143; do
   scenario=already
-  ble_power_command_body() { exit "$status"; }
+  ble_wake_bluez_body() { exit "$status"; }
   rc=0
   ble_power_command_once wake 01 > "$tmp/log" || rc=$?
   [ "$rc" -eq "$status" ]
@@ -61,7 +68,7 @@ done
 echo 'PASS: error and explicit process-exit cleanup (not a SIGKILL test)'
 
 scenario=busy
-ble_power_command_body() { return 0; }
+ble_wake_bluez_body() { return 0; }
 : > "$tmp/calls"
 ble_power_command_once wake 01 > "$tmp/log"
 [ ! -s "$tmp/calls" ]

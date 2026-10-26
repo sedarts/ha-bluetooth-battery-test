@@ -34,7 +34,7 @@ stage = os.environ["LIFECYCLE_STAGE"]
 args = sys.argv[1:]
 with (base / "calls").open("a") as log:
     log.write(name + " " + " ".join(args) + "\n")
-hang = ((name == "gatttool" and stage in ("gatt", "tree")) or
+hang = ((name == "bluetoothctl" and not args and stage in ("gatt", "tree")) or
         (name == "bluetoothctl" and args[:1] == ["info"] and stage == "info"))
 if hang:
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -48,9 +48,21 @@ if hang:
     time.sleep(120)
 elif name == "bluetoothctl" and args[:1] == ["info"]:
     print("Connected: yes" if stage == "unknown-owner" else "Connected: no")
-elif name == "gatttool" and stage == "busy":
-    print("connect: Resource busy (16)")
-    sys.exit(1)
+elif name == "bluetoothctl" and args[:1] == ["show"]:
+    print("Controller 8C:68:AB:E0:3F:F6\n\tPowered: yes")
+elif name == "bluetoothctl" and args[:1] == ["connect"]:
+    print("Connection successful")
+elif name == "bluetoothctl" and not args and stage == "busy":
+    count_file = base / "busy-count"
+    count = int(count_file.read_text()) if count_file.exists() else 0
+    count += 1
+    count_file.write_text(str(count))
+    if count <= 3:
+        print("Failed to write: Resource busy (16)")
+        sys.exit(1)
+    print("Attempting to write /org/bluez/hci0/dev_C0_28_8D_82_F7_BB/service0001/char0002")
+elif name == "bluetoothctl" and not args:
+    print("Attempting to write /org/bluez/hci0/dev_C0_28_8D_82_F7_BB/service0001/char0002")
 elif name == "mosquitto_sub":
     marker = base / "sent"
     again = base / "new-wake"
@@ -226,6 +238,7 @@ wait
             PM_MAC="C0:28:8D:82:F7:BB", PM_NAME="FAKE BOOM", PM_ENABLED="true",
             PM_BLE_WAKE="true", PM_ADAPTER_MAC="8C:68:AB:E0:3F:F6",
             PM_MQTT_HOST="FAKE-NO-NETWORK", PM_TEST_MAX_LOOPS="0",
+            PM_WAKE_TIMEOUT="6", PM_WAKE_BOOT_DELAY="0",
             PM_PAUSE_DIR=str(self.base / "pause"), PM_RENDERER_DIR=str(self.base / "wake"))
         if background:
             parent = self.start(["bash", "-c", '"$1" exec bash "$2" & echo $! > "$3/manager-pid"; wait',
@@ -269,12 +282,14 @@ wait
         self.assertTrue(self.until(lambda: parent.poll() is not None and not self.live(worker)))
         self.assertTrue(self.until(self.free, 2))
 
-    def test_unknown_connection_is_never_disconnected(self):
+    def test_connected_without_a2dp_allows_wake_without_disconnect(self):
         parent, _ = self.manager("unknown-owner", wait_worker=False)
         marker = self.base / "wake/C0:28:8D:82:F7:BB.error"
         self.assertTrue(self.until(marker.exists, 15))
         calls = (self.base / "calls").read_text()
         self.assertNotIn("bluetoothctl disconnect", calls)
+        self.assertIn("bluetoothctl connect C0:28:8D:82:F7:BB", calls)
+        self.assertIn("bluetoothctl \n", calls)
         self.assertNotIn("gatttool", calls)
         self.assertIsNone(parent.poll())
 
@@ -285,7 +300,7 @@ wait
         self.assertTrue(self.until(self.free, 2))
         self.assertNotIn("bluetoothctl disconnect", (self.base / "calls").read_text())
         (self.base / "new-wake").touch()
-        self.assertTrue(self.until(lambda: (self.base / "calls").read_text().count("gatttool ") >= 6, 15))
+        self.assertTrue(self.until(lambda: (self.base / "calls").read_text().count("bluetoothctl \n") >= 4, 15))
         self.assertIsNone(parent.poll())
 
     def test_info_deadline(self):

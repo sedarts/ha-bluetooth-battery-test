@@ -389,6 +389,19 @@ monitor_speaker() {
         grep -Fq "${sink}" <<<"${sinks}"
     }
 
+    wake_stage_log() {
+        local category="$1" message="$2" session_id started now elapsed=0
+        [ -f "${wake_request}" ] || return 0
+        session_id=$(awk '{print $1}' "${wake_request}" 2>/dev/null || echo unknown)
+        started=$(awk '{print $3}' "${wake_request}" 2>/dev/null || echo 0)
+        [[ "${started}" =~ ^[0-9]+$ ]] || started=0
+        now=$(date +%s)
+        if [ "${started}" -gt 0 ] && [ "${now}" -ge "${started}" ]; then
+            elapsed=$((now - started))
+        fi
+        bt_ops_log "[${category}] operation=${session_id} elapsed=${elapsed}s ${message}"
+    }
+
     # Pause demandée depuis la page d'appairage (GitHub issue #8) : un fichier
     # /tmp/btui/paused/<MAC en majuscules>, voir BTUI_PAUSE_DIR dans
     # webui/lib/btui.sh, contenant l'heure de fin en secondes epoch ou 0 pour
@@ -424,6 +437,7 @@ monitor_speaker() {
             acknowledge_wake_renderer
             return 0
         fi
+        wake_stage_log HA "Renderer ready result=starting device=${mac} uuid=${uuid} port=${port}"
         bashio::log.info "Starting the DLNA renderer for ${name} (uuid=${uuid}, port=${port})..." || true
         gmediarender \
             --gstout-audiosink=pulsesink \
@@ -445,8 +459,10 @@ monitor_speaker() {
         if [ -f "${wake_request}" ]; then
             if kill -0 "${renderer_pid}" 2>/dev/null; then
                 printf 'ready\n' > "${wake_request}.renderer_ready"
+                wake_stage_log HA "Renderer ready result=ok device=${mac}"
                 bashio::log.info "DLNA renderer handover acknowledged for ${name}." || true
             else
+                wake_stage_log HA "Renderer ready result=error reason=process-not-running device=${mac}"
                 bashio::log.warning "DLNA renderer failed before wake handover could be acknowledged for ${name}." || true
             fi
         fi
@@ -512,12 +528,14 @@ monitor_speaker() {
                 [[ "${wake_deadline}" =~ ^[0-9]+$ ]] || wake_deadline=0
                 wake_recover_attempt() {
                     wake_attempt_current="$1"
+                    wake_stage_log CLASSIC "Connecting A2DP result=start attempt=$1/$2 device=${mac}"
                     bt_ops_log "state=CONNECTING operation=${wake_session_id} attempt=$1/$2 Classic/A2DP recovery start device=${mac}"
                 recover_renderer_after_connect "${mac}" "${name}" "${sink}" "${card}" \
                     "/tmp/btui/paused/${mac^^}" "/tmp/btui/reconnect/${mac^^}" 3 3 3 || true
                 }
                 wake_audio_ready() {
                     if is_connected; then
+                        wake_stage_log AUDIO "Sink ready result=ok attempt=${wake_attempt_current}/4 device=${mac} sink=${sink}"
                         bt_ops_log "state=READY operation=${wake_session_id} attempt=${wake_attempt_current}/4 A2DP sink ready device=${mac}"
                         return 0
                     fi
@@ -527,6 +545,7 @@ monitor_speaker() {
                     mkdir -p "/tmp/btui/paused"
                     printf '0\n' > "/tmp/btui/paused/${mac^^}"
                     : > "${wake_request}.error"
+                    wake_stage_log AUDIO "Sink ready result=error attempts=$1/$2 reason=deadline-or-retry-limit device=${mac}"
                     bt_ops_log "state=ERROR operation=${wake_session_id} Classic/A2DP series ended ($1/$2 attempts within global deadline); reconnect suppressed device=${mac}"
                 }
                 run_classic_wake_retries 4 "${wake_deadline}" wake_recover_attempt wake_audio_ready wake_exhausted || true

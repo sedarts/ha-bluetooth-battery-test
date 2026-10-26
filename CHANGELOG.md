@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.6.2-test.13
+- Restore the UE BOOM 2 wake transport that physically succeeded in test.5:
+  one bounded BlueZ `bluetoothctl` GATT session selects the known power UUID
+  and submits the paired-controller payload. Do not add a direct ATT wake
+  fallback; the existing direct `gatttool` path remains limited to power-off.
+- Treat BlueZ `Device1.Connected: yes` as diagnostic bearer state, not proof of
+  A2DP readiness and not a veto on the explicit GATT wake. Preserve the A2DP
+  sink as the readiness authority and keep the existing renderer handover.
+- Keep the test.12 process supervisor, global wake deadline, shared Bluetooth
+  lock and scoped cleanup. Wake cleanup reaps bridge-owned children and never
+  issues a blanket device disconnect or claims physical power from a submitted
+  write.
+- Add wake-correlated `[BLE]`, `[POWER]`, `[CLASSIC]`, `[AUDIO]`, and `[HA]`
+  stage logs with elapsed time, result and error detail. Add regressions for a
+  generic connected state without A2DP, exact UUID/payload, bounded failures,
+  cleanup ordering, lock release and the absence of device-wide disconnects.
+- Pass the 20-case Linux process gate for test.13 on Debian CT 215 with Python
+  3.13.5: 20/20 passed, zero errors, zero skips, 74.702 seconds, final `OK`.
+  No deployment or hardware wake is part of this source release.
+
 ## 2.6.2-test.12
 - Treat `/proc/self/task/<pid>/children` as an optional optimization instead
   of a required cleanup interface. Fall back to a bounded `/proc` PPid scan

@@ -1,10 +1,12 @@
 # Linux-Prozesstests im isolierten Debian-LXC
 
 Stand: 2026-10-26. Ausschließlich `sedarts/ha-bluetooth-battery-test`, lokaler
-Arbeitsstand für 2.6.2-test.12 einschließlich der geprüften Korrekturen.
+Arbeitsstand für 2.6.2-test.13 einschließlich der lokalen Korrekturen.
 Ergänzung zu [RESOURCE-BUSY-ANALYSIS.md](RESOURCE-BUSY-ANALYSIS.md).
 Diese Anleitung verändert weder Bridge-Code noch Versionsnummer. Kein Deployment,
-kein Bluetooth-Hardwaretest. **Die 20 Linux-Tests wurden hier nicht ausgeführt.**
+kein Bluetooth-Hardwaretest. Der separate test.13-Lauf auf Debian CT 215 mit
+Python 3.13.5 bestand anschließend alle 20 Tests ohne Fehler oder Skips in
+74,702 Sekunden (`OK`); das frühere test.12-Ergebnis wurde nicht wiederverwendet.
 
 ## 1. Voraussetzungen und geprüfte Isolation
 
@@ -259,7 +261,7 @@ Jede der folgenden Methoden muss mit `... ok` erscheinen:
 | `test_orphan_must_not_pin_shared_lock` | Keine Lock-FD im Worker; Elternabbruch hinterlässt keinen Lock/Worker |
 | `test_repeated_signals` | Wiederholtes TERM/INT mit Cleanup und Lock-Freigabe |
 | `test_short_lived_processes_keep_success_status` | Kurzlebige erfolgreiche Prozesse behalten beim erzwungenen Fallback Status 0 |
-| `test_unknown_connection_is_never_disconnected` | Unbekannte Verbindung: kein GATT und kein geräteweiter Disconnect |
+| `test_connected_without_a2dp_allows_wake_without_disconnect` | `Connected: yes` ohne A2DP lässt den BlueZ-GATT-Wake zu, ohne geräteweiten Disconnect |
 | `test_missing_task_children_falls_back_to_ppid_scan` | Fehlende task-children-Datei wird durch den PPid-Scan ersetzt |
 | `test_task_children_omission_and_disappearing_entries_are_tolerated` | Ausgelassene und zwischenzeitlich verschwundene Proc-Einträge verursachen keinen falschen Fehler |
 | `test_changed_starttime_or_parent_rejects_stale_pid` | Geänderte Prozessidentität beziehungsweise Elternschaft verhindert ein Signal an eine stale PID |

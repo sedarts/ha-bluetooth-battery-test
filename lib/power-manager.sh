@@ -32,12 +32,24 @@ stop_debounce_deadline=0
 stop_candidate=""
 mode="disabled"
 PM_CURRENT_WAKE_DEADLINE=0
+PM_CURRENT_OPERATION_STARTED_SECONDS=0
+PM_CURRENT_WAKE_STARTED_EPOCH=0
 
 mqtt_args=(-h "${PM_MQTT_HOST}" -p "${PM_MQTT_PORT}")
 [ -n "${PM_MQTT_USER}" ] && mqtt_args+=(-u "${PM_MQTT_USER}")
 [ -n "${PM_MQTT_PASS}" ] && mqtt_args+=(-P "${PM_MQTT_PASS}")
 
 log() { printf '[%s][power-manager][op=%s] %s\n' "$(bt_ops_timestamp)" "${PM_CURRENT_OPERATION_ID:-${BT_OP_ID:-none}}" "$*"; }
+flow_log() {
+  local category="$1" elapsed=0
+  shift
+  if [ "${PM_CURRENT_OPERATION_STARTED_SECONDS:-0}" -gt 0 ]; then
+    elapsed=$((SECONDS - PM_CURRENT_OPERATION_STARTED_SECONDS))
+    [ "${elapsed}" -ge 0 ] || elapsed=0
+  fi
+  printf '[%s][%s][op=%s][+%ss] %s\n' "$(bt_ops_timestamp)" "${category}" \
+    "${PM_CURRENT_OPERATION_ID:-${BT_OP_ID:-none}}" "${elapsed}" "$*"
+}
 publish() { timeout 8 mosquitto_pub "${mqtt_args[@]}" -t "${state_topic}" -m "$1" -r >/dev/null 2>&1 || log "MQTT status publish failed"; }
 publish_management() { timeout 8 mosquitto_pub "${mqtt_args[@]}" -t "${management_topic}" -m "$1" -r >/dev/null 2>&1 || log "MQTT management-state publish failed"; }
 connected() {
@@ -54,7 +66,9 @@ request_renderer_handover() {
   local renderer_request="$1" renderer_ready="${1}.renderer_ready"
   rm -f "${renderer_ready}"
   rm -f "${renderer_request}.error"
-  if mkdir -p "${PM_RENDERER_DIR}" && printf '%s %s\n' "${PM_CURRENT_OPERATION_ID:-wake-$(date +%s)-$$}" "${PM_CURRENT_WAKE_DEADLINE}" > "${renderer_request}"; then
+  if mkdir -p "${PM_RENDERER_DIR}" && printf '%s %s %s\n' \
+      "${PM_CURRENT_OPERATION_ID:-wake-$(date +%s)-$$}" "${PM_CURRENT_WAKE_DEADLINE}" \
+      "${PM_CURRENT_WAKE_STARTED_EPOCH:-0}" > "${renderer_request}"; then
     log "renderer handover requested; normal reconnect monitor owns Classic/A2DP connection"
   else
     log "could not request renderer handover"
@@ -62,10 +76,10 @@ request_renderer_handover() {
   fi
 }
 
-# The BOOM power characteristic is written with the ATT procedure advertised
-# by its discovered properties. gatttool is used because this BlueZ 5.66 image's
-# bluetoothctl has no `bearer` command and exits before its async WriteValue
-# result can be observed. The final byte is 01 (on) or 02 (off).
+# Wake uses the BlueZ bluetoothctl GATT session that physically woke this UE
+# BOOM 2 in test.5. Power-off retains the separately validated direct ATT path.
+# Both transports remain bounded by the test.12 process supervisor. The final
+# byte is 01 (on) or 02 (off).
 ble_run() {
   local seconds="$1" remaining
   shift
@@ -112,15 +126,79 @@ ble_link_is_disconnected() {
 ble_power_command_once() (
   # EXIT runs synchronously before the waiting parent can release its lock or
   # start a newer wake. Never schedule a delayed/background disconnect.
-  trap 'rc=$?; trap - EXIT; log "BLE attempt-cleanup: own command processes reaped; no device-wide disconnect"; exit "$rc"' EXIT
-  ble_power_command_body "$@"
+  ble_attempt_cleanup() {
+    local rc=$?
+    trap - EXIT
+    flow_log BLE "Cleanup result=own-processes-reaped status=${rc} device_connection=preserved"
+    log "BLE attempt-cleanup: own command processes reaped; no device-wide disconnect"
+    exit "${rc}"
+  }
+  trap ble_attempt_cleanup EXIT
+  if [ "$1" = wake ]; then
+    ble_wake_bluez_body "$@"
+  else
+    ble_power_command_body "$@"
+  fi
 )
+
+ble_wake_bluez_body() {
+  local action="$1" command_byte="$2" bytes="" octet output status=0
+  local uuid="c6d6dc0d-07f5-47ef-9b59-630622b01fd3" value_handle="0x0003"
+  [ -n "${PM_ADAPTER_MAC}" ] || { flow_log BLE "Adapter ready result=error reason=paired-host-mac-missing"; return 1; }
+  [ "${action}" = wake ] && [ "${command_byte}" = 01 ] || return 1
+  for octet in ${PM_ADAPTER_MAC//:/ }; do bytes+="$((16#${octet})) "; done
+  bytes+="1"
+
+  output=$(ble_run 3 bluetoothctl show 2>&1) || status=$?
+  if [ "${status}" -ne 0 ] || ! grep -Eq '^[[:space:]]*Powered: yes[[:space:]]*$' <<<"${output}"; then
+    flow_log BLE "Adapter ready result=error exit=${status} details=${output//$'\n'/; }"
+    return 1
+  fi
+  flow_log BLE "Adapter ready result=ok controller=${PM_ADAPTER_MAC}"
+
+  status=0
+  output=$(ble_run 3 bluetoothctl info "${PM_MAC}" 2>&1) || status=$?
+  flow_log BLE "Device state result=$([ "${status}" -eq 0 ] && echo observed || echo unavailable) exit=${status} details=${output//$'\n'/; }"
+  # Device1.Connected covers every bearer and is not evidence of either an
+  # owned GATT link or a usable Classic/A2DP connection. It is diagnostic only.
+  status=0
+  flow_log BLE "Connecting GATT result=start device=${PM_MAC} transport=BlueZ"
+  output=$(ble_run 12 bluetoothctl connect "${PM_MAC}" 2>&1) || status=$?
+  flow_log BLE "Connecting GATT result=$([ "${status}" -eq 0 ] && echo requested || echo inconclusive) exit=${status} details=${output//$'\n'/; }"
+  sleep 1
+
+  flow_log BLE "Characteristic selection result=requested uuid=${uuid} value_handle=${value_handle}"
+  flow_log BLE "Wake write requested result=start uuid=${uuid} value_handle=${value_handle} payload=${PM_ADAPTER_MAC//:/}01"
+  status=0
+  output=$(ble_run 12 bash -c '
+    {
+      printf "menu gatt\nselect-attribute %s\nattribute-info\nwrite \"%s\"\n" "$1" "$2"
+      sleep 1
+      printf "quit\n"
+    } | bluetoothctl
+  ' bluez-gatt-wake "${uuid}" "${bytes}" 2>&1) || status=$?
+  if [ "${status}" -ne 0 ] || grep -Eqi 'failed|error|invalid|too many|not available|not permitted|not authorized' <<<"${output}"; then
+    flow_log BLE "Write result=error exit=${status} details=${output//$'\n'/; }"
+    return 1
+  fi
+  if ! grep -Eq 'Attempting to write .*/char0002' <<<"${output}"; then
+    flow_log BLE "Write result=unconfirmed exit=${status} reason=write-attempt-not-observed details=${output//$'\n'/; }"
+    return 1
+  fi
+  flow_log BLE "Characteristic found result=confirmed-by-write-target uuid=${uuid} value_handle=${value_handle}"
+  # bluetoothctl proves that the selected BlueZ characteristic received the
+  # request, but this CLI transcript does not expose a definitive ATT response.
+  flow_log BLE "Write result=request-submitted att_response=unconfirmed physical_power=unconfirmed"
+  log "BLE wake write submitted by bluetoothctl; ATT response and physical speaker action remain unconfirmed"
+  return 0
+}
 
 ble_power_command_body() {
   local action="$1" command_byte="$2" hex="" octet discovery status=0 uuid="c6d6dc0d-07f5-47ef-9b59-630622b01fd3"
   local handle properties write_flag write_flag_name write_args output
   [ -n "${PM_ADAPTER_MAC}" ] || { log "BLE power command unavailable: paired-host MAC is not configured"; return 1; }
-  [ "${action}" = wake ] || [ "${action}" = off ] || return 1
+  # The direct ATT implementation is intentionally not a wake fallback.
+  [ "${action}" = off ] || return 1
   for octet in ${PM_ADAPTER_MAC//:/ }; do printf -v octet '%02x' "$((16#${octet}))"; hex+="${octet}"; done
   printf -v octet '%02x' "$((16#${command_byte}))"; hex+="${octet}"
 
@@ -204,17 +282,20 @@ wait_for_renderer_ready() {
   local renderer_request="$1" renderer_ready="${1}.renderer_ready" deadline="$2"
   while [ "$(date +%s)" -lt "${deadline}" ]; do
     if [ -f "${renderer_request}.error" ]; then
+      flow_log HA "Renderer ready result=error reason=classic-a2dp-recovery-exhausted"
       log "wake failed: reconnect monitor exhausted its bounded Classic/A2DP series"
       return 1
     fi
     if [ -f "${renderer_ready}" ]; then
       rm -f "${renderer_request}" "${renderer_ready}"
       mode="ready"; publish "${mode}"
+      flow_log HA "Renderer ready result=ok"
       log "wake_success: A2DP sink and DLNA renderer are ready"
       return 0
     fi
     sleep 1
   done
+  flow_log HA "Renderer ready result=error reason=timeout timeout=${PM_WAKE_TIMEOUT}s"
   log "wake timed out: DLNA renderer did not confirm readiness within ${PM_WAKE_TIMEOUT}s"
   rm -f "${renderer_request}" "${renderer_ready}"
   return 1
@@ -226,6 +307,7 @@ fail_wake() {
   mkdir -p "${PM_PAUSE_DIR}"
   printf '0\n' > "${PM_PAUSE_DIR}/${PM_MAC^^}"
   : > "${renderer_request}.error"
+  flow_log POWER "Wake result=error reconnect=suppressed"
   log "state=ERROR wake failed; reconnect remains suppressed until a new explicit wake"
   mode="error"; publish "${mode}"
 }
@@ -261,9 +343,11 @@ wake_impl() {
   local pause_marker renderer_request deadline remaining boot_delay classic_reserve=47
   deadline=$(( $(date +%s) + PM_WAKE_TIMEOUT ))
   PM_CURRENT_WAKE_DEADLINE="${deadline}"
+  PM_CURRENT_WAKE_STARTED_EPOCH=$((deadline - PM_WAKE_TIMEOUT))
   pause_marker="${PM_PAUSE_DIR}/${PM_MAC^^}"
   renderer_request="${PM_RENDERER_DIR}/${PM_MAC^^}"
   log "wake command received"
+  flow_log POWER "Wake requested result=received device=${PM_MAC}"
   if [ "${idle_deadline}" -gt 0 ] || [ "${stop_debounce_deadline}" -gt 0 ]; then
     log "idle timer cancelled by wake/resume"
   fi
@@ -298,6 +382,7 @@ wake_impl() {
   if [ "${PM_BLE_WAKE}" = true ] && [ -n "${PM_ADAPTER_MAC}" ]; then
     mode="ble_waking"; publish "${mode}"
     if ble_power_command_locked wake 01; then
+      flow_log POWER "Waiting for startup result=write-submitted physical_power=unconfirmed"
       log "BLE wake command submitted; waiting for the speaker to switch to Classic audio"
     else
       bt_ops_release
@@ -323,6 +408,7 @@ wake_impl() {
     log "BLE wake skipped (ble_wake_enabled=${PM_BLE_WAKE}, adapter MAC configured=$([ -n "${PM_ADAPTER_MAC}" ] && echo yes || echo no))"
   fi
   request_renderer_handover "${renderer_request}" || { fail_wake "${renderer_request}"; return; }
+  flow_log CLASSIC "Connecting A2DP result=handover-requested owner=reconnect-monitor"
   # An explicit wake/resume is the only power-manager action that lifts an
   # idle/manual pause. Once removed, monitor_speaker() alone reconnects.
   if rm -f "${pause_marker}"; then
@@ -335,6 +421,7 @@ wake_impl() {
     if connected; then
       if a2dp_ready; then
         mode="waiting_for_a2dp"; publish "${mode}"
+        flow_log AUDIO "Sink ready result=ok sink=bluez_sink.${PM_MAC//:/_}.a2dp_sink"
         log "A2DP sink is ready; waiting for the DLNA renderer handover"
         mode="renderer_starting"; publish "${mode}"
         wait_for_renderer_ready "${renderer_request}" "${deadline}" || fail_wake "${renderer_request}"
@@ -345,13 +432,17 @@ wake_impl() {
     fi
     sleep 1
   done
-    log "wake timed out: no A2DP sink became available within ${PM_WAKE_TIMEOUT}s"
+  flow_log AUDIO "Sink ready result=error reason=timeout timeout=${PM_WAKE_TIMEOUT}s"
+  log "wake timed out: no A2DP sink became available within ${PM_WAKE_TIMEOUT}s"
   fail_wake "${renderer_request}"
 }
 
 wake() {
   PM_CURRENT_OPERATION_ID="wake-$$-$(date +%s)"
+  PM_CURRENT_OPERATION_STARTED_SECONDS=${SECONDS}
   wake_impl "$@"
+  PM_CURRENT_OPERATION_STARTED_SECONDS=0
+  PM_CURRENT_WAKE_STARTED_EPOCH=0
   PM_CURRENT_OPERATION_ID=""
 }
 

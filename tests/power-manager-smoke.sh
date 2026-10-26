@@ -48,8 +48,9 @@ EOF
 cat >"$tmp/bin/flock" <<'EOF'
 #!/usr/bin/env bash
 if [ "${1:-}" = -u ]; then rmdir "${BT_OPS_LOCK_FILE}.held" 2>/dev/null || true; exit 0; fi
-if [ "${1:-}" = -w ]; then shift 2; else shift; fi
-limit=${1:-0}; start=$SECONDS
+limit=0
+if [ "${1:-}" = -w ]; then limit="$2"; shift 2; else shift; fi
+start=$SECONDS
 while ! mkdir "${BT_OPS_LOCK_FILE}.held" 2>/dev/null; do
   [ "$((SECONDS - start))" -ge "$limit" ] && exit 1
   sleep 0.05
@@ -71,7 +72,7 @@ cat >"$tmp/bin/mosquitto_sub" <<'EOF'
 count=0; [ -f "$PM_TEST_SUB_COUNT" ] && count=$(cat "$PM_TEST_SUB_COUNT")
 count=$((count + 1)); printf '%s' "$count" >"$PM_TEST_SUB_COUNT"
 case "${PM_TEST_SCENARIO}:${count}" in
-  success:1|ble_only:1|gatt_error:1|monitor_handover:1|command_property:1|missing_confirmation:1|error_then_new_wake:1|error_then_new_wake:2|resource_busy:1|resource_busy_exhausted:1) printf '%s wake\n' "$PM_TEST_COMMAND_TOPIC" ;;
+  success:1|ble_only:1|gatt_error:1|monitor_handover:1|command_property:1|missing_confirmation:1|error_then_new_wake:1|error_then_new_wake:2|resource_busy:1|resource_busy_exhausted:1|original_discovery:1|invalid_*:1|write_exit_failure:1|write_timeout:1) printf '%s wake\n' "$PM_TEST_COMMAND_TOPIC" ;;
   success:2|success:3) printf '%s idle\n' "$PM_TEST_PLAYBACK_TOPIC" ;;
   playing_cancels_idle:1) printf '%s idle\n' "$PM_TEST_PLAYBACK_TOPIC" ;;
   playing_cancels_idle:2) printf '%s playing\n' "$PM_TEST_PLAYBACK_TOPIC" ;;
@@ -119,9 +120,19 @@ if [[ " $* " == *' --characteristics '* ]]; then
     if [ "$count" -lt 3 ] || [ "${PM_TEST_SCENARIO:-}" = resource_busy_exhausted ]; then echo 'connect: Resource busy (16)'; exit 1; fi
   fi
   [ "${PM_TEST_GATT_DISCOVERY_FAIL:-no}" = yes ] && { echo 'Connection failed'; exit 0; }
-  printf 'handle: 0x0002, char properties: %s, char value handle: 0x0003, uuid: c6d6dc0d-07f5-47ef-9b59-630622b01fd3\n' "${PM_TEST_GATT_PROPERTIES:-0x08}"
+  original=$(<"$PM_TEST_DISCOVERY_FIXTURE")
+  case "${PM_TEST_SCENARIO}" in
+    original_discovery|resource_busy) printf '%s\n' "$original" ;;
+    invalid_uuid) printf '%s\n' "${original/b01fd3/b01fd4}" ;;
+    invalid_ambiguous) printf '%s\n%s\n' "$original" "$original" ;;
+    invalid_incomplete) printf '%s\n' "${original/char value handle = 0x0003, /}" ;;
+    invalid_properties) printf '%s\n' "${original/0x08/0x02}" ;;
+    *) printf 'handle: 0x0002, char properties: %s, char value handle: 0x0003, uuid: c6d6dc0d-07f5-47ef-9b59-630622b01fd3\n' "${PM_TEST_GATT_PROPERTIES:-0x08}" ;;
+  esac
   exit 0
 fi
+[ "${PM_TEST_SCENARIO}" = write_exit_failure ] && exit 1
+[ "${PM_TEST_SCENARIO}" = write_timeout ] && exit 124
 if [ "${PM_TEST_GATT_WRITE_FAIL:-no}" = yes ]; then
   echo 'Characteristic Write Request failed: Insufficient authentication'
   exit 0
@@ -143,11 +154,15 @@ run_case() {
   PM_TEST_SUB_COUNT="$tmp/${scenario}.sub" PM_TEST_INFO_COUNT="$tmp/${scenario}.info" PM_TEST_PACTL_COUNT="$tmp/${scenario}.pactl" PM_TEST_CLOCK="$tmp/${scenario}.clock" \
   PM_PAUSE_DIR="$tmp/${scenario}.paused" \
   PM_BT_OPS_LIB="$root/lib/bluetooth-ops.sh" BT_OPS_LOCK_FILE="$tmp/${scenario}.bt.lock" \
+  PM_GATT_DISCOVERY_LIB="$root/lib/gatt-discovery.sh" PM_TEST_DISCOVERY_FIXTURE="$root/tests/fixtures/gatttool-test9-discovery.txt" \
   PM_TEST_COMMAND_TOPIC='bluetooth_audio_bridge/c0288d82f7bb/power/command' \
   PM_TEST_PLAYBACK_TOPIC='bluetooth_audio_bridge/c0288d82f7bb/power/playback' PATH="$tmp/bin:$PATH" \
   PM_TEST_MAX_LOOPS="$loops" PM_MAC=C0:28:8D:82:F7:BB PM_NAME='UE BOOM 2' PM_ENABLED=true \
   PM_IDLE_TIMEOUT=2 PM_STOP_DEBOUNCE=1 PM_BLE_WAKE=true PM_ADAPTER_MAC=8C:68:AB:E0:3F:F6 \
   PM_RENDERER_DIR="$renderer_dir" PM_WAKE_TIMEOUT=20 PM_WAKE_BOOT_DELAY=1 PM_MQTT_HOST=test "$root/lib/power-manager.sh" >>"$log" 2>&1
+  # Applies to every success, parse/ATT error, timeout, retry exhaustion, and
+  # ERROR -> new wake scenario, not just an isolated lock-helper invocation.
+  [ ! -e "$tmp/${scenario}.bt.lock.held" ] || { echo "lock leaked in $scenario" >&2; return 1; }
 }
 
 run_case success yes 4 no 2 yes
@@ -212,6 +227,7 @@ run_case resource_busy yes 1 no 1 yes
 assert_log_contains resource_busy "$tmp/resource_busy.log" 'BLE wake resource busy; bounded retry 1/3 after 1s'
 assert_log_contains resource_busy "$tmp/resource_busy.log" 'BLE wake resource busy; bounded retry 2/3 after 1s'
 [ "$(cat "$tmp/resource_busy.gatt")" -eq 3 ]
+assert_log_contains resource_busy "$tmp/resource_busy.log" '--char-write-req --handle 0x0003 --value=8c68abe03ff601'
 run_case resource_busy_exhausted no 1
 assert_log_contains resource_busy_exhausted "$tmp/resource_busy_exhausted.log" 'BLE wake series ended attempts=3/3 result=failed'
 assert_log_contains resource_busy_exhausted "$tmp/resource_busy_exhausted.log" 'state=ERROR wake failed; reconnect remains suppressed until a new explicit wake'
@@ -223,6 +239,43 @@ run_case error_then_new_wake yes 3 no 1 yes 0x08 yes
 assert_log_contains error_then_new_wake "$tmp/error_then_new_wake.log" 'state=ERROR wake failed; reconnect remains suppressed until a new explicit wake'
 [ "$(grep -c 'wake command received' "$tmp/error_then_new_wake.log")" -eq 2 ]
 assert_log_contains error_then_new_wake "$tmp/error_then_new_wake.log" 'wake_success: A2DP sink and DLNA renderer are ready'
+
+run_case original_discovery yes 1 no 1 yes
+assert_log_contains original_discovery "$tmp/original_discovery.log" 'value_handle=0x0003 properties=0x08'
+assert_log_contains original_discovery "$tmp/original_discovery.log" '--char-write-req --handle 0x0003 --value=8c68abe03ff601'
+assert_log_excludes original_discovery "$tmp/original_discovery.log" '--handle 0x0002'
+assert_log_contains original_discovery "$tmp/original_discovery.log" 'wake_success: A2DP sink and DLNA renderer are ready'
+
+. "$root/lib/renderer-recovery.sh"
+bashio::log.info() { :; }
+connect_speaker() { classic_calls=$((classic_calls + 1)); }
+for scenario in invalid_uuid invalid_ambiguous invalid_incomplete invalid_properties write_exit_failure write_timeout; do
+  run_case "$scenario" no 1
+done
+for scenario in invalid_uuid invalid_ambiguous invalid_incomplete invalid_properties write_exit_failure write_timeout gatt_error missing_confirmation resource_busy_exhausted; do
+  log="$tmp/${scenario}.log"
+  assert_wake_processed "$scenario" "$log"
+  assert_log_contains "$scenario" "$log" 'state=ERROR wake failed'
+  assert_log_excludes "$scenario" "$log" 'renderer handover requested'
+  assert_log_excludes "$scenario" "$log" 'normal reconnect monitor released after BLE wake'
+  [[ "$scenario" != invalid_* ]] || assert_log_excludes "$scenario" "$log" '--char-write'
+  [ -f "$tmp/${scenario}.renderer/C0:28:8D:82:F7:BB.error" ]
+  pause="$tmp/${scenario}.paused/C0:28:8D:82:F7:BB"
+  [ "$(<"$pause")" = 0 ]
+  # Invoke the real recovery entry point with the actual failed-wake marker.
+  # It must refuse the automatic Classic call on repeated monitor passes.
+  classic_calls=0
+  for pass in 1 2 3; do
+    if recover_renderer_after_connect C0:28:8D:82:F7:BB BOOM sink card "$pause" "$tmp/reconnect-$scenario" 1; then
+      echo "failed wake allowed recovery in $scenario" >&2; exit 1
+    else
+      [ "$?" -eq 2 ]
+    fi
+  done
+  [ "$classic_calls" -eq 0 ]
+done
+assert_log_contains write_exit_failure "$tmp/write_exit_failure.log" 'GATT write request failed (gatttool exit 1)'
+assert_log_contains write_timeout "$tmp/write_timeout.log" 'GATT write request failed (gatttool exit 124)'
 
 # A stale idle notification may arrive immediately before playback is reported.
 # The later playing state must clear both the debounce and any pending idle

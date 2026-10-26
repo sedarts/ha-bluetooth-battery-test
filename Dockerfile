@@ -91,6 +91,7 @@ COPY lib/power-manager.sh /opt/btui/lib/power-manager.sh
 COPY lib/renderer-recovery.sh /opt/btui/lib/renderer-recovery.sh
 COPY lib/bluetooth-ops.sh /opt/btui/lib/bluetooth-ops.sh
 COPY lib/wake-retries.sh /opt/btui/lib/wake-retries.sh
+COPY lib/gatt-discovery.sh /opt/btui/lib/gatt-discovery.sh
 COPY mpd.conf.template /etc/mpd.conf.template
 # On copie un "modèle" (template) de config MPD, pas la config finale :
 # le nom exact du sink Bluetooth dépend de l'adresse MAC configurée par

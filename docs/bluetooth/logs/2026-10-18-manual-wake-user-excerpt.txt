@@ -1,0 +1,4 @@
+Attempting to write /org/bluez/hci0/dev_C0_28_8D_82_F7_BB/service0001/char0002
+ServicesResolved: no
+LE Public disconnected with reason 3
+LE.Connected: no

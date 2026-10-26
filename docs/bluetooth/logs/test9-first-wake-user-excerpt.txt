@@ -1,0 +1,27 @@
+01:03:51.474
+state=WAKING operation=ble-wake attempt=1/3 start
+
+01:03:51.510
+BLE wake GATT discovery failed:
+connect to C0:28:8D:82:F7:BB:
+Resource busy (16)
+
+01:03:52.515
+state=WAKING operation=ble-wake attempt=2/3 start
+
+01:03:52.548
+BLE wake GATT discovery failed:
+Resource busy (16)
+
+01:03:53.553
+state=WAKING operation=ble-wake attempt=3/3 start
+
+01:03:54.867
+BLE wake GATT characteristic not found:
+handle = 0x0002,
+char properties = 0x08,
+char value handle = 0x0003,
+uuid = c6d6dc0d-07f5-47ef-9b59-630622b01fd3
+
+01:03:54.877
+state=ERROR wake failed

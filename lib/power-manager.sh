@@ -4,6 +4,7 @@
 # configured BLE-off attempt (when enabled) and then cleans up Classic audio.
 set -u -o pipefail
 . "${PM_BT_OPS_LIB:-/opt/btui/lib/bluetooth-ops.sh}"
+. "${PM_GATT_DISCOVERY_LIB:-/opt/btui/lib/gatt-discovery.sh}"
 
 : "${PM_MAC:?}" "${PM_NAME:?}" "${PM_ENABLED:=false}" "${PM_IDLE_TIMEOUT:=300}" "${PM_STOP_DEBOUNCE:=10}"
 : "${PM_BLE_WAKE:=false}" "${PM_ADAPTER_MAC:=}" "${PM_MQTT_HOST:=}"
@@ -61,32 +62,39 @@ request_renderer_handover() {
 # by its discovered properties. gatttool is used because this BlueZ 5.66 image's
 # bluetoothctl has no `bearer` command and exits before its async WriteValue
 # result can be observed. The final byte is 01 (on) or 02 (off).
+ble_release_link() {
+  local phase="$1" output status=0
+  log "BLE link release start phase=${phase} device=${PM_MAC}"
+  output=$(timeout 5 bluetoothctl disconnect "${PM_MAC}" 2>&1) || status=$?
+  log "BLE link release returned phase=${phase} exit=${status}: ${output//$'\n'/; }; link teardown is not independently confirmed"
+  # Disconnect can fail because the target is already disconnected. Discovery
+  # remains the next bounded attempt; do not reset the adapter or other devices.
+}
+
 ble_power_command_once() {
   local action="$1" command_byte="$2" hex="" octet discovery status=0 uuid="c6d6dc0d-07f5-47ef-9b59-630622b01fd3"
-  local characteristic handle properties write_flag write_flag_name write_args output
+  local handle properties write_flag write_flag_name write_args output
   [ -n "${PM_ADAPTER_MAC}" ] || { log "BLE power command unavailable: paired-host MAC is not configured"; return 1; }
   [ "${action}" = wake ] || [ "${action}" = off ] || return 1
   for octet in ${PM_ADAPTER_MAC//:/ }; do printf -v octet '%02x' "$((16#${octet}))"; hex+="${octet}"; done
   printf -v octet '%02x' "$((16#${command_byte}))"; hex+="${octet}"
 
   # Release a Classic connection before opening the LE ATT connection.
-  bluetoothctl disconnect "${PM_MAC}" >/dev/null 2>&1 || true
+  ble_release_link "before-${action}-discovery"
+  log "BLE ${action} GATT discovery start device=${PM_MAC} uuid=${uuid}"
   discovery=$(timeout 5 gatttool --adapter hci0 --device "${PM_MAC}" --characteristics --uuid "${uuid}" 2>&1) || status=$?
+  log "BLE ${action} GATT discovery process exited status=${status}: ${discovery//$'\n'/; }"
   if [ "${status}" -ne 0 ] || grep -Eqi 'failed|error|not connected|not found' <<<"${discovery}"; then
     log "BLE ${action} GATT discovery failed (gatttool exit ${status}): ${discovery//$'\n'/; }"
     return 1
   fi
-  characteristic=$(grep -iF "uuid: ${uuid}" <<<"${discovery}" | head -n1)
-  if [ -z "${characteristic}" ]; then
-    log "BLE ${action} GATT characteristic ${uuid} not found: ${discovery//$'\n'/; }"
+  if ! parse_gatt_discovery "${discovery}" "${uuid}"; then
+    log "BLE ${action} GATT discovery rejected: ${GATT_PARSE_ERROR}; no write sent"
     return 1
   fi
-  handle=$(sed -n 's/.*char value handle: *\(0x[0-9a-fA-F]*\).*/\1/p' <<<"${characteristic}")
-  properties=$(sed -n 's/.*char properties: *\(0x[0-9a-fA-F]*\).*/\1/p' <<<"${characteristic}")
-  if [ -z "${handle}" ] || [ -z "${properties}" ]; then
-    log "BLE ${action} GATT discovery returned incomplete characteristic metadata: ${characteristic}"
-    return 1
-  fi
+  handle="${GATT_VALUE_HANDLE}"
+  properties="${GATT_PROPERTIES}"
+  log "BLE ${action} GATT characteristic selected uuid=${uuid} value_handle=${handle} properties=${properties}"
   write_flag=$((properties))
   if (( write_flag & 8 )); then
     write_args=(--char-write-req)
@@ -99,7 +107,11 @@ ble_power_command_once() {
     return 1
   fi
   status=0
+  # Separate one-shot processes reconnect for the write. Do not insert a sleep
+  # or another BlueZ operation between discovery and this ATT request.
+  log "BLE ${action} GATT write ${write_flag_name} start value_handle=${handle}"
   output=$(timeout 5 gatttool --adapter hci0 --device "${PM_MAC}" "${write_args[@]}" --handle "${handle}" --value="${hex}" 2>&1) || status=$?
+  log "BLE ${action} GATT write process exited status=${status}: ${output//$'\n'/; }"
   if [ "${status}" -ne 0 ] || grep -Eqi 'failed|error|protocol error|not permitted|not authorized' <<<"${output}"; then
     log "BLE ${action} GATT write ${write_flag_name} failed (gatttool exit ${status}): ${output//$'\n'/; }"
     return 1
@@ -113,7 +125,7 @@ ble_power_command_once() {
   else
     log "BLE ${action} GATT write command submitted; ATT confirmation is not defined for Write Command, physical speaker action remains unconfirmed"
   fi
-  bluetoothctl disconnect "${PM_MAC}" >/dev/null 2>&1 || true
+  ble_release_link "after-${action}-write"
   return 0
 }
 

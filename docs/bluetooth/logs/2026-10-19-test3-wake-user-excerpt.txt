@@ -1,0 +1,12 @@
+[power-manager] command received: wake
+[power-manager] wake command received
+[power-manager] Bluetooth reconnect block cleared
+[power-manager] reconnect monitor paused while wake waits for A2DP
+[power-manager] BLE wake enabled; requesting GATT connection (payload: 140 104 171 224 63 246 1)
+[power-manager] Bluetooth connection request for BLE wake accepted
+[power-manager] BLE wake write accepted by bluetoothctl; waiting for the speaker to switch to Classic audio
+
+[power-manager] Classic audio connection request was not accepted; waiting up to 45s for A2DP in case BlueZ is still transitioning
+[power-manager] wake timed out: no A2DP sink became available within 45s
+[power-manager] reconnect remains paused after failed wake
+[power-manager] Bluetooth reconnect remains blocked after failed wake

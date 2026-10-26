@@ -1,6 +1,21 @@
 # Changelog
 
-## 2.6.2-test.9 (local, not released)
+## 2.6.2-test.10
+- Correct GATT discovery parsing for the actual BlueZ noninteractive `=`
+  output and interactive `:` output; reject ambiguous/incomplete records and
+  exact-UUID mismatches before writing the validated value handle.
+- Add the reported test.9 discovery fixture, parser regressions, failed-wake
+  reconnect suppression and per-scenario lock-release assertions.
+- Add timestamped discovery/write results and bound/log the existing target
+  disconnect calls. Keep the payload, retry limits and renderer path unchanged.
+- Reconstruct the October 17–19 reports and Windows Python trail; record
+  unresolved ATT contention, MQTT receive gaps and separate hardware checks.
+- Release the reviewed changes as test.10 under the existing add-on identity.
+  Discovery/write transport and retry architecture are unchanged from the
+  approved candidate. Physical BLE wake and power-off remain unverified in
+  this build; release does not constitute a hardware test.
+
+## 2.6.2-test.9
 - Serialize bridge-owned Classic connect/disconnect, BLE GATT, pairing, and scan
   operations through a bounded adapter lock. A wake pause is published before
   waiting for an in-flight Classic operation; the pause is rechecked after lock.

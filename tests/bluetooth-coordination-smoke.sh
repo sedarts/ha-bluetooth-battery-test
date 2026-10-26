@@ -7,8 +7,9 @@ mkdir -p "$tmp/bin"
 cat >"$tmp/bin/flock" <<'EOF'
 #!/usr/bin/env bash
 if [ "${1:-}" = -u ]; then rmdir "${BT_OPS_LOCK_FILE}.held" 2>/dev/null || true; exit 0; fi
-if [ "${1:-}" = -w ]; then shift 2; else shift; fi
-limit=${1:-0}; start=$SECONDS
+limit=0
+if [ "${1:-}" = -w ]; then limit="$2"; shift 2; else shift; fi
+start=$SECONDS
 while ! mkdir "${BT_OPS_LOCK_FILE}.held" 2>/dev/null; do
   [ "$((SECONDS - start))" -ge "$limit" ] && exit 1
   command sleep 0.02

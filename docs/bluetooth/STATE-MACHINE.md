@@ -44,5 +44,22 @@ after an ERROR state.
 Renderer recovery, A2DP sink naming, Music Assistant, SSDP, 300-second idle
 timeout, and 10-second stop debounce are retained.
 
+## Local test.10 candidate
+
+No states or transition owners change. Within the shared lock, the BLE path is:
+target disconnect (bounded/logged) -> one-shot discovery -> validate exactly
+one complete UUID match -> write the **value** handle -> verify ATT request
+response -> target release -> existing Classic/A2DP handover. The intermediate
+discovery and write remain separate connections. Rejected discovery, ATT
+failure or absent request confirmation returns to the existing bounded/error
+path. Ordinary failures release the shared lock and leave the reconnect pause
+in place; a later explicit wake may retry. Physical power remains unknown.
+
+No Bluetooth operation or sleep is inserted between successful discovery and
+write; only local parsing and timestamped log output occur there. The existing
+one-second busy retry backoff is unchanged. Retaining the MQTT process after
+ERROR is distinct from continuous subscription: reception gaps and the
+cooperative deadline limitation are documented in [KNOWN-ISSUES.md](KNOWN-ISSUES.md).
+
 `flock` is a small util-linux file-locker available in the Alpine 3.18 package
 repository; the container image adds that package. [Alpine package record](https://pkgs.alpinelinux.org/package/v3.18/main/x86_64/flock).

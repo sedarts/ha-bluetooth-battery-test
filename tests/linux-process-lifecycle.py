@@ -8,6 +8,7 @@ gate failures, not expectedFailure. The current implementation is not certified.
 """
 import os
 from pathlib import Path
+import importlib.util
 import shutil
 import signal
 import subprocess
@@ -18,6 +19,9 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 LINUX = sys.platform.startswith("linux") and Path("/proc/self/fd").exists()
+SPEC = importlib.util.spec_from_file_location("bluetooth_process", ROOT / "lib/bluetooth-process.py")
+PROCESS = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(PROCESS)
 
 # This fixture replaces only Bluetooth/audio/MQTT executables. Real bash,
 # timeout, signals, /proc and flock remain in use. It deliberately ignores TERM
@@ -57,6 +61,50 @@ elif name == "mosquitto_sub":
     else:
         time.sleep(.05)
 '''
+
+
+class ProcEnumeration(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="boom-proc-fixture-")
+        self.proc = Path(self.temp.name)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def stat(self, pid, ppid, starttime, state="S"):
+        path = self.proc / str(pid) / "stat"
+        path.parent.mkdir(exist_ok=True)
+        # proc fields after comm: state is field 3, ppid field 4 and
+        # starttime field 22 (index 19 in the split tail).
+        middle = ["0"] * 17
+        path.write_text(f"{pid} (fixture worker) {state} {ppid} " + " ".join(middle) + f" {starttime}\n")
+
+    def test_missing_task_children_falls_back_to_ppid_scan(self):
+        self.stat(201, 100, 7001)
+        self.stat(202, 99, 7002)
+        children, source, reliable = PROCESS.direct_children(100, self.proc)
+        self.assertTrue(reliable)
+        self.assertEqual(source, "proc-scan")
+        self.assertEqual(children, [(201, "7001")])
+
+    def test_task_children_omission_and_disappearing_entries_are_tolerated(self):
+        children_file = self.proc / "self/task/100/children"
+        children_file.parent.mkdir(parents=True)
+        children_file.write_text("")
+        (self.proc / "301").mkdir()
+        self.stat(302, 100, 8002)
+        children, source, reliable = PROCESS.direct_children(100, self.proc)
+        self.assertTrue(reliable)
+        self.assertEqual(source, "task-children+proc-scan")
+        self.assertEqual(children, [(302, "8002")])
+
+    def test_changed_starttime_or_parent_rejects_stale_pid(self):
+        self.stat(401, 100, 9001)
+        self.assertTrue(PROCESS.same_direct_child(401, "9001", 100, self.proc))
+        self.stat(401, 100, 9002)
+        self.assertFalse(PROCESS.same_direct_child(401, "9001", 100, self.proc))
+        self.stat(401, 101, 9001)
+        self.assertFalse(PROCESS.same_direct_child(401, "9001", 100, self.proc))
 
 
 @unittest.skipUnless(LINUX, "Linux /proc required; Windows/MSYS is not a kernel test")
@@ -251,7 +299,25 @@ wait
         worker = int((self.base / "worker").read_text())
         self.assertFalse(self.live(worker))
 
+    def test_short_lived_processes_keep_success_status(self):
+        scan_env = dict(self.env, BT_PROCESS_FORCE_PROC_SCAN="1")
+        for _attempt in range(20):
+            process = subprocess.run(
+                [self.env["BT_PROCESS_RUNNER"], str(os.getpid()), "2", "", "true"],
+                env=scan_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, timeout=5, check=False)
+            self.assertEqual(process.returncode, 0, process.stdout)
+
     def test_adopted_descendant_reaped(self):
+        parent, worker = self.manager("tree")
+        self.assertTrue(self.until(lambda: (self.base / "grandchild").exists()))
+        grandchild = int((self.base / "grandchild").read_text())
+        self.assertTrue(self.until(lambda: not self.live(worker) and not self.live(grandchild)))
+        self.assertTrue(self.until(self.free, 2))
+        self.assertIsNone(parent.poll())
+
+    def test_adopted_descendant_reaped_with_proc_scan_fallback(self):
+        self.env["BT_PROCESS_FORCE_PROC_SCAN"] = "1"
         parent, worker = self.manager("tree")
         self.assertTrue(self.until(lambda: (self.base / "grandchild").exists()))
         grandchild = int((self.base / "grandchild").read_text())

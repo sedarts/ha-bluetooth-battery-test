@@ -8,13 +8,126 @@ import subprocess
 import sys
 import time
 
+PROC_ROOT = Path("/proc")
+CLEANUP_SECONDS = 2.0
 
-def identity(pid):
+
+def process_record(pid, proc_root=PROC_ROOT):
     try:
-        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
-        return None if fields[0] == "Z" else fields[19]
-    except (OSError, IndexError):
+        fields = (proc_root / str(pid) / "stat").read_text().rsplit(")", 1)[1].split()
+        # Fields after comm start at proc stat field 3: state, ppid, ...,
+        # starttime. Keep ppid and starttime together to reject PID reuse.
+        return fields[0], int(fields[1]), fields[19]
+    except (OSError, IndexError, ValueError):
         return None
+
+
+def identity(pid, proc_root=PROC_ROOT):
+    record = process_record(pid, proc_root)
+    return None if not record or record[0] == "Z" else record[2]
+
+
+def direct_children(parent, proc_root=PROC_ROOT, force_scan=False):
+    """Return verified direct children and whether enumeration was reliable.
+
+    Linux may expose task/<tid>/children, but that optional procfs entry is
+    absent in the deployed Alpine container and can omit racing exits. Always
+    cross-check it with a /proc PPid scan; disappearing entries are normal.
+    """
+    children_file = proc_root / "self" / "task" / str(parent) / "children"
+    records = {}
+    fast_available = False
+    if not force_scan:
+        try:
+            pids = [int(value) for value in children_file.read_text().split()]
+        except (OSError, ValueError):
+            pass
+        else:
+            fast_available = True
+            for pid in pids:
+                record = process_record(pid, proc_root)
+                if record and record[1] == parent:
+                    records[pid] = record[2]
+
+    try:
+        entries = list(proc_root.iterdir())
+    except OSError:
+        return sorted(records.items()), "task-children", False
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        record = process_record(pid, proc_root)
+        if record and record[1] == parent:
+            records[pid] = record[2]
+    source = "task-children+proc-scan" if fast_available else "proc-scan"
+    return sorted(records.items()), source, True
+
+
+def same_direct_child(pid, starttime, parent, proc_root=PROC_ROOT):
+    record = process_record(pid, proc_root)
+    return bool(record and record[1] == parent and record[2] == starttime)
+
+
+def signal_owned_child(pid, starttime, parent, proc_root=PROC_ROOT):
+    """Signal only the same process that was observed as our direct child."""
+    if not same_direct_child(pid, starttime, parent, proc_root):
+        return False
+    pidfd = None
+    if hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal"):
+        try:
+            pidfd = os.pidfd_open(pid, 0)
+            # Opening a pidfd pins the identity. Recheck ownership after open;
+            # if the process exited/reparented, do not signal it.
+            if not same_direct_child(pid, starttime, parent, proc_root):
+                return False
+            signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+            return True
+        except ProcessLookupError:
+            return True
+        except OSError:
+            pass
+        finally:
+            if pidfd is not None:
+                os.close(pidfd)
+    # Older kernels/Python: recheck immediately before the PID signal. The
+    # exact PPid+starttime match prevents a stale scan result from being used.
+    if not same_direct_child(pid, starttime, parent, proc_root):
+        return False
+    try:
+        os.kill(pid, signal.SIGKILL)
+        return True
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+
+
+def reap_owned_children(deadline, proc_root=PROC_ROOT):
+    parent = os.getpid()
+    force_scan = os.environ.get("BT_PROCESS_FORCE_PROC_SCAN") == "1"
+    scan_logged = False
+    while time.monotonic() < deadline:
+        children, source, reliable = direct_children(parent, proc_root, force_scan)
+        if source == "proc-scan" and not scan_logged:
+            print("bluetooth-process: task children unavailable; using bounded PPid scan", file=sys.stderr)
+            scan_logged = True
+        if not reliable:
+            print("bluetooth-process: cleanup cannot enumerate owned children", file=sys.stderr)
+            return False
+        if not children:
+            return True
+        for pid, starttime in children:
+            try:
+                waited, _status = os.waitpid(pid, os.WNOHANG)
+                if waited == pid:
+                    continue
+            except ChildProcessError:
+                continue
+            signal_owned_child(pid, starttime, parent, proc_root)
+        time.sleep(.02)
+    children, _source, reliable = direct_children(parent, proc_root, force_scan)
+    return reliable and not children
 
 
 def main():
@@ -89,20 +202,18 @@ def run_child(command, owner, owner_id, seconds, stop, aborted):
                 pass
             if grace:
                 time.sleep(grace)
-        child.wait()
+        cleanup_deadline = time.monotonic() + CLEANUP_SECONDS
+        try:
+            child.wait(timeout=max(0, cleanup_deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            result = 125
+            print(f"bluetooth-process: cleanup deadline waiting for pid={child.pid}", file=sys.stderr)
         # Adopted descendants also include children that changed session. Only
-        # direct, unreaped children of this supervisor are eligible for a kill.
-        while True:
-            children = Path(f"/proc/self/task/{os.getpid()}/children").read_text().split()
-            if not children:
-                break
-            for pid in map(int, children):
-                try:
-                    os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
-                    os.kill(pid, signal.SIGKILL)
-                    os.waitpid(pid, 0)
-                except (ChildProcessError, ProcessLookupError):
-                    pass
+        # verified direct children of this supervisor are eligible for a kill.
+        # Enumeration and waiting are bounded even for kernel D-state failures.
+        if not reap_owned_children(cleanup_deadline):
+            result = 125
+            print("bluetooth-process: cleanup deadline with owned children remaining", file=sys.stderr)
         print(f"bluetooth-process: reaped pid={child.pid} status={result}", file=sys.stderr)
     return result
 

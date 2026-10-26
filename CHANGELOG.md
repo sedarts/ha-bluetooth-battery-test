@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.6.2-test.12
+- Treat `/proc/self/task/<pid>/children` as an optional optimization instead
+  of a required cleanup interface. Fall back to a bounded `/proc` PPid scan
+  when the entry is unavailable or incomplete.
+- Verify direct-child ownership with PPid and process start time before
+  signalling; use pidfds when available and keep all leader/descendant cleanup
+  inside the existing bounded supervisor path.
+- Preserve status from successful short-lived Bluetooth commands when the
+  optional task-children entry is absent. Keep timeouts, Bluetooth locks,
+  device-connection ownership rules, and the no-global-disconnect policy.
+- Expand the Linux lifecycle gate from 15 to 20 cases with missing-proc-entry,
+  task-list omission, short-lived process, adopted-descendant fallback, and
+  stale-PID/parent regressions. All 20 passed without skips on Debian with
+  Python 3.13.5 in Proxmox CT 215 in 61.973 seconds.
+- Update the isolated LXC guide and add the test.12 diagnosis. An Alpine image
+  run remains outstanding because no local container runtime was available;
+  no hardware wake or Home Assistant deployment is implied by this release.
+
 ## 2.6.2-test.11
 - Supervise bridge-owned Bluetooth commands with a bounded Python process
   helper that terminates and reaps its own process tree on timeout, owner exit,

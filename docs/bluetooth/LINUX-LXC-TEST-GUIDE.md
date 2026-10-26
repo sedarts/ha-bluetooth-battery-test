@@ -1,10 +1,10 @@
 # Linux-Prozesstests im isolierten Debian-LXC
 
 Stand: 2026-10-26. Ausschließlich `sedarts/ha-bluetooth-battery-test`, lokaler
-Arbeitsstand auf 2.6.2-test.10 einschließlich uncommitteter/neuer Dateien.
+Arbeitsstand für 2.6.2-test.12 einschließlich der geprüften Korrekturen.
 Ergänzung zu [RESOURCE-BUSY-ANALYSIS.md](RESOURCE-BUSY-ANALYSIS.md).
 Diese Anleitung verändert weder Bridge-Code noch Versionsnummer. Kein Deployment,
-kein Bluetooth-Hardwaretest. **Die 15 Linux-Tests wurden hier nicht ausgeführt.**
+kein Bluetooth-Hardwaretest. **Die 20 Linux-Tests wurden hier nicht ausgeführt.**
 
 ## 1. Voraussetzungen und geprüfte Isolation
 
@@ -18,7 +18,7 @@ Geprüft wurden `tests/linux-process-lifecycle.py`, `lib/bluetooth-process.py`,
 | `bash`, `util-linux`, `coreutils`, `grep` | Echte Bash, `flock`, `timeout`, `mktemp`, `sleep`, Dateiverwaltung und Textprüfung |
 | `tar`, `gzip`, `procps` | Übertragung, Entpacken, Prozessbestandsaufnahme |
 | Normaler Benutzer `boomtest` | Darf eigene Prozesse starten, signalisieren und abwarten; eigene temporäre Dateien anlegen |
-| Linux `/proc` | Lesbare eigene `stat`-/`fd`-Einträge und `/proc/self/task/<pid>/children` |
+| Linux `/proc` | Lesbare eigene `stat`-/`fd`-Einträge; `/proc/self/task/<pid>/children` ist optional und wird nur als Hinweis verwendet |
 | Kernel-Funktionen | `fork`, `setsid`, `waitid` mit `WNOWAIT`, `waitpid`, `flock`, `prctl(PR_SET_CHILD_SUBREAPER)` |
 | Ausführbares temporäres Dateisystem | Test-Fixtures werden mit Modus 0700 gestartet; kein `noexec` auf dem Test-TMPDIR |
 
@@ -173,7 +173,9 @@ import ctypes, os, pathlib, sys
 assert sys.platform.startswith('linux')
 assert sys.version_info[:2] in ((3, 11), (3, 13)), sys.version
 assert pathlib.Path('/proc/self/fd').is_dir()
-assert pathlib.Path(f'/proc/self/task/{os.getpid()}/children').exists()
+children = pathlib.Path(f'/proc/self/task/{os.getpid()}/children')
+print('task_children=' + ('present' if children.exists()
+      else 'absent; bounded PPid fallback expected'))
 assert hasattr(os, 'WNOWAIT') and hasattr(os, 'waitid')
 libc = ctypes.CDLL(None, use_errno=True)
 if libc.prctl(36, 1, 0, 0, 0) != 0:
@@ -222,12 +224,14 @@ test "${codes[0]}" -eq 0 && test "${codes[1]}" -eq 0 || exit 1
 python3 - "$log" <<'PY'
 import pathlib, re, sys
 text = pathlib.Path(sys.argv[1]).read_text()
-cases = re.findall(r'^test_\w+ \(__main__\.Lifecycle\.test_\w+\) \.\.\. ok$', text, re.M)
-if (len(cases) != 15 or not re.search(r'^Ran 15 tests in ', text, re.M)
+cases = re.findall(
+    r'^test_\w+ \(__main__\.(?:Lifecycle|ProcEnumeration)\.test_\w+\) \.\.\. ok$',
+    text, re.M)
+if (len(cases) != 20 or not re.search(r'^Ran 20 tests in ', text, re.M)
         or not re.search(r'^OK$', text, re.M)
         or re.search(r'skipped|FAILED|ERROR|FAIL:', text)):
-    raise SystemExit('NICHT BESTANDEN: exakt 15 erfolgreiche Tests ohne Skip erforderlich')
-print('PASS: 15/15 Linux-Prozesstests, 0 skipped')
+    raise SystemExit('NICHT BESTANDEN: exakt 20 erfolgreiche Tests ohne Skip erforderlich')
+print('PASS: 20/20 Linux-Prozesstests, 0 skipped')
 PY
 TEST
 ```
@@ -244,6 +248,7 @@ Jede der folgenden Methoden muss mit `... ok` erscheinen:
 | Test | Nachweis |
 | --- | --- |
 | `test_adopted_descendant_reaped` | Eigene Enkel mit neuer Session werden beendet; Manager bleibt aktiv |
+| `test_adopted_descendant_reaped_with_proc_scan_fallback` | Derselbe Cleanup funktioniert ohne task-children-Datei über den PPid-Fallback |
 | `test_background_manager_receives_int` | SIGINT erreicht asynchron gestarteten Manager |
 | `test_busy_cleanup_and_new_wake` | Busy führt zu ERROR/Lock-Freigabe, ohne Disconnect; neuer expliziter Wake möglich |
 | `test_explicit_unlock_releases_inherited_description` | Kontrollfall: explizites Unlock trotz geerbtem Descriptor |
@@ -253,17 +258,21 @@ Jede der folgenden Methoden muss mit `... ok` erscheinen:
 | `test_info_int`, `test_info_term`, `test_info_kill` | Manager-Abbruch während Info; Worker endet und Lock wird frei |
 | `test_orphan_must_not_pin_shared_lock` | Keine Lock-FD im Worker; Elternabbruch hinterlässt keinen Lock/Worker |
 | `test_repeated_signals` | Wiederholtes TERM/INT mit Cleanup und Lock-Freigabe |
+| `test_short_lived_processes_keep_success_status` | Kurzlebige erfolgreiche Prozesse behalten beim erzwungenen Fallback Status 0 |
 | `test_unknown_connection_is_never_disconnected` | Unbekannte Verbindung: kein GATT und kein geräteweiter Disconnect |
+| `test_missing_task_children_falls_back_to_ppid_scan` | Fehlende task-children-Datei wird durch den PPid-Scan ersetzt |
+| `test_task_children_omission_and_disappearing_entries_are_tolerated` | Ausgelassene und zwischenzeitlich verschwundene Proc-Einträge verursachen keinen falschen Fehler |
+| `test_changed_starttime_or_parent_rejects_stale_pid` | Geänderte Prozessidentität beziehungsweise Elternschaft verhindert ein Signal an eine stale PID |
 
-Die gruppierten Zeilen umfassen zusammen genau **15 Einzeltests**. Erwartetes Ende
+Die gruppierten Zeilen umfassen zusammen genau **20 Einzeltests**. Erwartetes Ende
 (Laufzeit variabel, nicht vorab als gemessen ausgeben):
 
 ```text
-Ran 15 tests in <Dauer>s
+Ran 20 tests in <Dauer>s
 
 OK
 test_exit=0 tee_exit=0
-PASS: 15/15 Linux-Prozesstests, 0 skipped
+PASS: 20/20 Linux-Prozesstests, 0 skipped
 ```
 
 Zusätzlich `processes-after.txt` prüfen: außer dem Auswertungs-Shellprozess und
